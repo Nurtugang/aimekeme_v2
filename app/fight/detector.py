@@ -1,8 +1,8 @@
-"""Violence detector service.
+"""Детектор драк (X3D-M).
 
-Wraps the X3D-M model loaded once at startup and exposes a single
-``predict`` entry point. Frame decoding, preprocessing (from ``app.model``)
-and GPU inference all live here, keeping the HTTP layer in ``main.py`` thin.
+Модель загружается один раз при старте; predict декодирует 16 base64-кадров,
+препроцессит и классифицирует клип. GPU-инференс под локом (один процесс,
+одна видеокарта).
 """
 
 from __future__ import annotations
@@ -18,45 +18,39 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from app.fight.model import load_model, preprocess_frames
 from app.config import Settings
-from app.model import load_model, preprocess_frames
 
-logger = logging.getLogger("violence_api.detector")
+logger = logging.getLogger("surveillance.fight")
 
-# Index of the "violent" class in the model's output logits.
+# Индекс класса "драка" в логитах модели.
 _FIGHT_CLASS_IDX = 1
-# Optional data-URI prefix we tolerate, e.g. "data:image/jpeg;base64,...".
+# Терпим необязательный data-URI префикс, напр. "data:image/jpeg;base64,...".
 _DATA_URI_MARKER = "base64,"
 
 
 class InvalidFrameError(ValueError):
-    """Raised when a frame cannot be decoded into an image.
-
-    Carries the 0-based ``index`` of the offending frame so the API layer
-    can build a precise error message.
-    """
+    """Кадр не удалось декодировать. Несёт 0-based индекс кадра для сообщения."""
 
     def __init__(self, index: int):
         self.index = index
         super().__init__(f"Invalid base64 in frame {index}")
 
 
-class ViolenceDetector:
-    def __init__(self, settings: Settings):
+class FightDetector:
+    def __init__(self, settings: Settings, device: torch.device):
         self._settings = settings
-        self._device: torch.device | None = None
+        self._device = device
         self._model: torch.nn.Module | None = None
-        # Serialize access to a single GPU/model across worker threads.
+        # Сериализуем доступ к одной модели/GPU между потоками воркеров.
         self._lock = threading.Lock()
 
     # --- lifecycle ---------------------------------------------------------
 
     def load(self) -> None:
-        """Resolve the device and load model weights. Call once at startup."""
-        self._device = self._resolve_device(self._settings.device)
         logger.info("Loading X3D-M on device=%s ...", self._device)
         self._model = load_model(self._device)
-        logger.info("Model loaded and ready.")
+        logger.info("Fight model ready.")
 
     @property
     def is_ready(self) -> bool:
@@ -64,23 +58,17 @@ class ViolenceDetector:
 
     @property
     def device(self) -> str:
-        return str(self._device) if self._device is not None else "uninitialized"
-
-    @staticmethod
-    def _resolve_device(preference: str) -> torch.device:
-        if preference == "auto":
-            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        return torch.device(preference)
+        return str(self._device)
 
     # --- inference ---------------------------------------------------------
 
     def predict(self, frames: list[str]) -> dict:
-        """Decode, preprocess and classify a clip of base64 JPEG frames.
+        """Декод + препроцесс + классификация клипа из base64-JPEG кадров.
 
         Raises:
-            InvalidFrameError: if any frame is not valid base64/JPEG.
+            InvalidFrameError: если какой-то кадр не валидный base64/JPEG.
         """
-        if self._model is None or self._device is None:
+        if self._model is None:
             raise RuntimeError("Model is not loaded")
 
         start = time.perf_counter()
@@ -99,8 +87,7 @@ class ViolenceDetector:
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
 
-        # Важное событие — драка. Обычные кадры пишем в DEBUG (по умолчанию скрыт),
-        # чтобы лог не зарастал «водой».
+        # Важное событие — драка. Обычные кадры пишем в DEBUG (по умолчанию скрыт).
         if is_fight:
             logger.warning("FIGHT detected: confidence=%.3f (%.1f ms)", confidence, elapsed_ms)
         else:
@@ -116,7 +103,7 @@ class ViolenceDetector:
 
     @staticmethod
     def _decode_frame(raw: str, index: int) -> np.ndarray:
-        """base64 JPEG string -> BGR numpy array (H, W, 3), as OpenCV produces."""
+        """base64 JPEG -> BGR numpy array (H, W, 3), как отдаёт OpenCV."""
         if _DATA_URI_MARKER in raw:
             raw = raw.split(_DATA_URI_MARKER, 1)[1]
 
@@ -128,6 +115,5 @@ class ViolenceDetector:
         buffer = np.frombuffer(data, dtype=np.uint8)
         image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
         if image is None:
-            # Valid base64 but not a decodable image — same client-side fix.
             raise InvalidFrameError(index)
         return image

@@ -1,5 +1,5 @@
 """Нарезает видео на окна по 16 кадров и для каждого окна сохраняет два файла:
-  - payload.json  — готовое тело запроса к POST /detect_violence (16 base64-JPEG);
+  - payload.json  — готовое тело запроса к POST /detect/fight (16 base64-JPEG);
   - clip.mp4      — эти же 16 кадров как видео, чтобы глазами увидеть момент.
 
 Структура вывода (папка названа по имени видео):
@@ -17,7 +17,7 @@
 Пример:
     python scripts/build_payload.py path/to/video.mp4
     python scripts/build_payload.py video.mp4 -o out --stride 8   # с перекрытием
-    curl -X POST http://localhost:8000/detect_violence \\
+    curl -X POST http://localhost:8000/detect/fight \\
          -H "Content-Type: application/json" \\
          -d @video/window_0000_f000000-000015/payload.json
 """

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from huggingface_hub import hf_hub_download
 
-logger = logging.getLogger("violence_api.model")
+logger = logging.getLogger("surveillance.fight.model")
 
 # Вход X3D-M: 224×224, нормализация из pytorchvideo.
 _INPUT_SIZE = (224, 224)

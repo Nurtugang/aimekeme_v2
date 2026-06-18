@@ -1,16 +1,22 @@
-"""FastAPI application: HTTP layer for the violence detector.
+"""FastAPI-приложение: модульный монолит системы видеонаблюдения.
 
-The model is loaded exactly once, at startup, via the lifespan handler.
+Один процесс, один общий torch. Все модели грузятся ОДИН раз при старте
+(lifespan) и складываются в app.state.detectors; роутеры берут готовые
+детекторы оттуда через request.app.state — без загрузки на запрос.
 """
 
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, status
+import torch
+from fastapi import FastAPI
+from pydantic import BaseModel
 
+from app.face.detector import FaceDetector
+from app.face.router import router as face_router
+from app.fight.detector import FightDetector
+from app.fight.router import router as fight_router
 from app.config import settings
-from app.detector import InvalidFrameError, ViolenceDetector
-from app.schemas import DetectionRequest, DetectionResponse, HealthResponse
 
 # Глобальная настройка логирования.
 logging.basicConfig(
@@ -18,51 +24,63 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-# Single detector instance shared across requests.
-detector = ViolenceDetector(settings)
+
+def resolve_device(preference: str) -> torch.device:
+    """auto -> cuda при наличии, иначе cpu; либо явное значение (cuda/cpu/cuda:0)."""
+    if preference == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(preference)
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    detector.load()  # грузим модель один раз при старте
+async def lifespan(app: FastAPI):
+    device = resolve_device(settings.device)
+
+    fight = FightDetector(settings, device)
+    fight.load()
+
+    face = FaceDetector(settings, device)
+    face.load()
+
+    # Кладём готовые модели на app.state — отсюда их берут роутеры.
+    app.state.detectors = {"fight": fight, "face": face}
+
     yield
 
 
 app = FastAPI(
-    title="Violence Detection API",
-    description="Классификация 16-кадрового клипа как `fight` или `normal`.",
+    title="Intelligent Surveillance API",
+    description="Алгоритмы видеонаблюдения: детекция драк и распознавание лиц.",
     version=settings.api_version,
     lifespan=lifespan,
 )
 
+app.include_router(fight_router)
+app.include_router(face_router)
+
+
+class ModelHealth(BaseModel):
+    name: str
+    ready: bool
+    device: str
+
+
+class HealthResponse(BaseModel):
+    status: str
+    models: list[ModelHealth]
+    version: str
+
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 def health() -> HealthResponse:
-    """Liveness/readiness probe for orchestration (k8s, load balancers)."""
+    """Готовность: какие модели загружены и на каком устройстве."""
+    models = [
+        ModelHealth(name=name, ready=det.is_ready, device=det.device)
+        for name, det in app.state.detectors.items()
+    ]
+    all_ready = all(m.ready for m in models) and bool(models)
     return HealthResponse(
-        status="ok" if detector.is_ready else "loading",
-        model_ready=detector.is_ready,
-        device=detector.device,
+        status="ok" if all_ready else "loading",
+        models=models,
         version=settings.api_version,
     )
-
-
-@app.post("/detect_violence", response_model=DetectionResponse, tags=["detection"])
-def detect_violence(request: DetectionRequest) -> DetectionResponse:
-    """Classify a 16-frame clip as `fight` or `normal`."""
-    n_frames = len(request.frames)
-    if n_frames != settings.expected_frames:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Expected {settings.expected_frames} frames, got {n_frames}",
-        )
-
-    try:
-        result = detector.predict(request.frames)
-    except InvalidFrameError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid base64 in frame {exc.index}",
-        ) from exc
-
-    return DetectionResponse(**result)
