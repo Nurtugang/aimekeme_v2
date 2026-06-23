@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
     fight = FightDetector(settings, device)
     fight.load()
 
-    face = FaceDetector(settings, device)
+    face = FaceDetector(settings)
     face.load()
 
     # Кладём готовые модели на app.state — отсюда их берут роутеры.

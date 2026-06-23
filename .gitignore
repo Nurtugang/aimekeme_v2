@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 test/
 .env
+CLAUDE.md
 
 # Игнорируем файлы с лицами, оставляем только README.md для примера структуры папки.
 known_faces/*

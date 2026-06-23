@@ -1,21 +1,28 @@
-"""Модели для распознавания лиц (facenet-pytorch).
+"""Модель распознавания лиц: ArcFace (buffalo_l) через insightface/onnxruntime.
 
-- MTCNN              — детектор лиц (находит и выравнивает лица в кадре);
-- InceptionResnetV1  — эмбеддер (лицо -> вектор 512, L2-нормированный).
+Один объект FaceAnalysis делает всё: детекция + landmarks + выравнивание + эмбеддинг.
+`app.get(bgr)` -> список лиц, у каждого `bbox`, `det_score`, `normed_embedding`
+(512, уже L2-нормирован, поэтому косинус = скалярное произведение).
 
-Веса InceptionResnetV1 (vggface2) качаются один раз в кеш torch hub.
+ВАЖНО про GPU на Blackwell (sm_120): `import torch` стоит ДО insightface намеренно.
+torch при импорте подгружает в процесс CUDA-библиотеки (libcublasLt/cudnn), которые
+нужны CUDAExecutionProvider onnxruntime. Без этого onnxruntime молча падает на CPU
+(ошибка `libcublasLt.so.12: cannot open shared object file`).
+
+Веса buffalo_l качаются один раз в ~/.insightface/models/.
 """
 
 import logging
 
-import torch
-from facenet_pytorch import MTCNN, InceptionResnetV1
+import torch  # noqa: F401 -- грузит CUDA-либы для onnxruntime, импорт обязателен ПЕРВЫМ
+from insightface.app import FaceAnalysis
 
 logger = logging.getLogger("surveillance.face.model")
 
 
-def load_face_models(device: torch.device) -> tuple[MTCNN, InceptionResnetV1]:
-    mtcnn = MTCNN(keep_all=True, device=device)
-    resnet = InceptionResnetV1(pretrained="vggface2").eval().to(device)
-    logger.info("Face models loaded on device=%s", device)
-    return mtcnn, resnet
+def load_face_model(providers: list[str], ctx_id: int, det_size: int,
+                    det_thresh: float) -> FaceAnalysis:
+    app = FaceAnalysis(name="buffalo_l", providers=providers)
+    app.prepare(ctx_id=ctx_id, det_size=(det_size, det_size), det_thresh=det_thresh)
+    logger.info("Face model (buffalo_l) ready: ctx_id=%d providers=%s", ctx_id, providers)
+    return app

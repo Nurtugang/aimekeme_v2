@@ -8,8 +8,24 @@
 
 **AI-API трогать нельзя** — это зафиксированный контракт (см. его README):
 - `POST /detect/fight` — тело `{ "frames": [16 × base64_jpg] }` → `{ label, confidence, processing_ms }`
-- `POST /detect/face`  — тело `{ "frame": base64_jpg }` → `{ faces:[{box,det_confidence,identity,similarity}], count, processing_ms }`
+- `POST /detect/face`  — тело `{ "frame": base64_jpg }` →
+  `{ faces:[{box,det_confidence,identity,identity_id,similarity}], count, processing_ms }`
+  (`identity` = имя или `"unknown"`; `identity_id` = стабильный ID человека или `null`).
 - `GET  /health`
+
+**База лиц живёт в AI-API** (эталоны + эмбеддинги model-specific). Платформа
+управляет ею через эти эндпоинты (например, из админки):
+- `POST   /faces`             — `multipart/form-data`: `name` + `images` (1..N файлов,
+  на каждом одно чёткое лицо) → `{ id, name, created_at, photos }`. Несколько фото
+  на человека сильно повышают точность — заливать разные ракурсы/условия.
+- `POST   /faces/{id}/images` — догрузить ещё фото человеку → та же запись.
+- `GET    /faces`             — список `[{ id, name, created_at, photos }]`.
+- `GET    /faces/{id}/image`  — первичное фото человека (image/jpeg).
+- `DELETE /faces/{id}`        — удалить человека.
+
+Распознавание (`/detect/face`): модель — ArcFace (`buffalo_l`), порог косинуса 0.42.
+Журнал событий платформы пусть ссылается на `identity_id` (стабильный, переживает
+переименование), а не на имя.
 
 ## Архитектура платформы (MVP, без Redis)
 
