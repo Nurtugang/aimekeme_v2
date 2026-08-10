@@ -11,7 +11,18 @@ class Settings(BaseSettings):
 
     # fight
     expected_frames: int = 16     # Модель для классификации драки X3D-M требует 16 кадров
-    fight_threshold: float = 0.5
+    fight_threshold: float = 0.4
+
+    # fire: выбор модели
+    # siglip2 (классификатор кадра) | yolo_dfire (боксы, AGPL)
+    fire_model: str = "siglip2"
+    fire_threshold: float = 0.4   # fire/smoke ниже порога уверенности => normal
+    use_tiling: bool = True       # Включить/выключить нарезку 2x2 для поиска мелких очагов
+
+    # counting: выбор модели
+    count_model: str = "yolo_head"        # frcnn (torchvision, класс person) | yolo_head (YOLOv8 SCUT-HEAD)
+    count_score_thresh: float = 0.4   # порог score(frcnn)/conf(yolo_head) — боксы ниже в подсчёт не идут
+    count_head_variant: str = "medium"  # только для yolo_head: medium (точнее) | nano (быстрее)
 
     # --- face (ArcFace / buffalo_l) ---
     known_faces_dir: str = "known_faces"

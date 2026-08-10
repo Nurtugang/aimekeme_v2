@@ -6,6 +6,14 @@
 - **fight** — детекция драк по клипу из 16 кадров (X3D-M, torch);
 - **face** — распознавание лиц по одному кадру (ArcFace, модель `buffalo_l` через
   insightface/onnxruntime). Мини-база с несколькими эталонными фото на человека.
+- **fire** — детекция огня/дыма по одному кадру. Три сменные модели (выбор через
+  `FIRE_MODEL`): `siglip2` — SigLIP2-классификатор кадра целиком (transformers);
+  `yolo_dfire` — YOLOv8n, дообученный на D-Fire, даёт боксы вокруг очага
+  (ultralytics, AGPL; по умолчанию). Классы `fire`/`smoke`/`normal`;
+- **counting** — подсчёт людей по одному кадру. Две сменные модели (выбор через
+  `COUNT_MODEL`): `frcnn` — torchvision Faster R-CNN, класс person (BSD, по умолчанию);
+  `yolo_head` — YOLOv8-детектор голов на SCUT-HEAD, точнее в толпе (ultralytics, AGPL).
+  `count` = число боксов выше порога.
 
 Все модели грузятся **один раз при старте** (lifespan) и складываются в реестр;
 
@@ -16,7 +24,9 @@ app/
 ├── main.py                 # FastAPI: lifespan грузит все модели в app.state, /health
 ├── config.py               # Settings (env / .env)
 ├── fight/                  # model.py · detector.py · schemas.py · router.py
-└── face/                   # model.py · detector.py · schemas.py · router.py
+├── face/                   # model.py · detector.py · schemas.py · router.py
+├── fire/                   # model_siglip2.py · model_yolo_dfire.py · detector.py · schemas.py · router.py
+└── counting/               # model_frcnn.py · model_yolo_head.py · detector.py · schemas.py · router.py
 known_faces/                # мини-база лиц: <id>_<k>.jpg + faces.db (см. known_faces/README.md)
 scripts/
 ├── build_payload.py        # нарезает видео на окна по 16 кадров для тестов fight
@@ -36,7 +46,10 @@ scripts/
 ```bash
 python3.10 -m venv venv && source venv/bin/activate
 
-# 1) основной стек: torch (cu128) + FastAPI + fight. Индекс torch уже прописан в req.txt.
+# 1) основной стек: torch (cu128) + FastAPI + fight/fire/counting. Индекс torch уже в req.txt.
+#    Сюда же входит ultralytics (для counting `yolo_head`) — тяжёлый и под AGPL-3.0.
+#    Если yolo_head не нужен (используете только `frcnn`) — можно убрать блок
+#    "counting: yolo_head backend" из req.txt перед установкой.
 pip install -r req.txt
 
 # 2) распознавание лиц (ArcFace). Ставить ИМЕННО в этом порядке:
@@ -53,8 +66,10 @@ GPU-вариант ставим первым, а `insightface` — без его
 GPU-нюанс: onnxruntime берёт CUDA-библиотеки из torch, поэтому face-модуль
 импортирует torch до insightface (уже сделано в коде, `app/face/model.py`).
 
-Веса моделей качаются при первом старте: X3D — в `~/.cache/huggingface/`,
-ArcFace `buffalo_l` — в `~/.insightface/models/`.
+Веса моделей качаются при первом старте: X3D и SigLIP2 (fire) — в
+`~/.cache/huggingface/`, ArcFace `buffalo_l` — в `~/.insightface/models/`,
+Faster R-CNN (counting `frcnn`) — в `~/.cache/torch/hub/checkpoints/`,
+YOLOv8 head (counting `yolo_head`) — в `~/.cache/aimekeme/head_detector/`.
 
 ## Запуск
 
@@ -95,6 +110,36 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 }
 ```
 `identity` — имя или `"unknown"`; `identity_id` — стабильный ID человека или `null`.
+Ошибки (HTTP 422): `Invalid base64 image`.
+
+### `POST /detect/fire`
+Запрос — один base64-JPEG кадр:
+```json
+{ "frame": "<base64_jpg>" }
+```
+Ответ:
+```json
+{ "label": "fire", "confidence": 0.91, "processing_ms": 20.0 }
+```
+`label` ∈ `fire` / `smoke` / `normal`. Порог `FIRE_THRESHOLD`: если топ-класс —
+`fire`/`smoke`, но уверенность ниже порога, отдаётся `normal` (режем ложные
+срабатывания на лампы/экраны). Это фильтр на **один** кадр; подтверждение по N
+кадрам подряд — на стороне брокера (контракт stateless). CV-детекция огня
+дополняет дымовые датчики, а не заменяет их.
+Ошибки (HTTP 422): `Invalid base64 image`.
+
+### `POST /detect/counting`
+Запрос — один base64-JPEG кадр:
+```json
+{ "frame": "<base64_jpg>" }
+```
+Ответ:
+```json
+{ "label": "person", "count": 12, "confidence": 0.94, "processing_ms": 74.0 }
+```
+`count` — число обнаруженных людей (боксы выше `COUNT_SCORE_THRESH`);
+`confidence` — средний score детектора по ним (0.0, если никого). Ответ одинаков
+для обеих моделей (`COUNT_MODEL` = `frcnn` | `yolo_head`) — контракт не меняется.
 Ошибки (HTTP 422): `Invalid base64 image`.
 
 ### База лиц (enrollment)
@@ -139,6 +184,12 @@ curl -X POST http://localhost:8000/detect/fight \
 |------------------------|---------------|------------------------------------------------|
 | `DEVICE`               | `auto`        | `auto` / `cuda` / `cpu` / `cuda:0` ...          |
 | `FIGHT_THRESHOLD`      | `0.5`         | `P(fight) >= threshold` ⇒ метка `fight`        |
+| `FIRE_MODEL`           | `yolo_dfire`  | модель огня: `siglip2` (классификатор) / `yolo_dfire` (боксы, AGPL) |
+| `FIRE_THRESHOLD`       | `0.5`         | `fire`/`smoke` ниже порога уверенности ⇒ `normal` |
+| `USE_TILING`           | `true`        | нарезка кадра 2x2 + кадр целиком для мелких очагов |
+| `COUNT_MODEL`          | `frcnn`       | модель подсчёта: `frcnn` (person, BSD) / `yolo_head` (головы, AGPL) |
+| `COUNT_SCORE_THRESH`   | `0.5`         | боксы ниже score/conf не идут в подсчёт         |
+| `COUNT_HEAD_VARIANT`   | `medium`      | для `yolo_head`: `medium` (точнее) / `nano` (быстрее) |
 | `FACE_MATCH_THRESHOLD` | `0.42`        | косинусная близость (ArcFace) >= порог ⇒ узнан  |
 | `FACE_DET_THRESH`      | `0.5`         | порог детектора лиц (insightface)               |
 | `KNOWN_FACES_DIR`      | `known_faces` | папка с эталонами лиц                           |
@@ -149,3 +200,7 @@ curl -X POST http://localhost:8000/detect/fight \
 1. Feichtenhofer, C. (2020). X3D: Expanding Architectures for Efficient Video Recognition. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (pp. 203-213).
 2. M. Cheng, K. Cai, and M. Li, "RWF-2000: An Open Large Scale Video Database for Violence Detection," in 2020 25th International Conference on Pattern Recognition (ICPR), 2021, pp. 4183-4190. doi: 10.1109/ICPR48806.2021.9412502.
 3. N. Nguyen, "School Violence Detection: A Comparative Study of 3D CNN Architectures," Graduation thesis, University of Information Technology (UIT), VNU-HCM, 2026
+4. Zhai, X., et al. (2023). Sigmoid Loss for Language Image Pre-Training (SigLIP). In Proceedings of the IEEE/CVF International Conference on Computer Vision (pp. 11975-11986). (fire-классификатор `prithivMLmods/Fire-Detection-Siglip2` на базе SigLIP2, Apache-2.0)
+5. Li, Y., et al. (2021). Benchmarking Detection Transfer Learning with Vision Transformers. arXiv:2111.11429. (torchvision `fasterrcnn_resnet50_fpn_v2`, веса COCO)
+6. Peng, D., et al. (2018). Detecting Heads using Feature Refine Net and Cascaded Multi-scale Architecture. arXiv:1803.09256. (датасет SCUT-HEAD)
+7. Jocher, G., et al. (2023). Ultralytics YOLOv8. https://github.com/ultralytics/ultralytics (counting `yolo_head` — веса `Abcfsa/YOLOv8_head_detector`, обучены на SCUT-HEAD; AGPL-3.0)
