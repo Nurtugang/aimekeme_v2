@@ -1,18 +1,24 @@
-"""Геометрия вовлечённости: чистая математика без моделей и тяжёлых зависимостей.
+"""Логика вовлечённости: геометрия, трекинг и время — без единой модели.
 
-Здесь живёт всё, что можно посчитать и проверить без GPU: углы головы из матрицы
-трансформации, кроп головы по скелету, слияние взгляда, классификация позы
-(пишет / телефон / спит). Модели дают сырые числа — этот модуль превращает их
+Здесь всё, что можно посчитать и проверить без GPU и без весов: углы головы из
+матрицы, кроп головы по скелету, признаки позы, сопоставление треков и окно
+наблюдений по человеку. Модели отдают сырые числа, этот модуль превращает их
 в смысл, а detector.py только оркестрирует.
 
-Разделение сделано ради тестируемости: правила ниже — эвристики, их придётся
-подкручивать под конкретную аудиторию, и делать это надо на юнит-тестах, а не
-гоняя 4К-видео.
+Отдельный файл (сверх model/detector/schemas/router из CONVENTIONS.md) нужен
+ровно ради этого: пороги и правила ниже — самая хрупкая часть модуля, и они
+покрыты тестами, которые не поднимают ни одной модели (tests/).
+
+Три слоя, в порядке зависимости:
+
+1. ГЕОМЕТРИЯ — мгновенные измерения по одному кадру.
+2. ТРЕКИНГ   — превращает кадры в временной ряд по человеку.
+3. ОКНО      — читает вовлечённость из статистики этого ряда.
 
 СИСТЕМА КООРДИНАТ. Пиксели кадра: x вправо, y ВНИЗ (как отдаёт OpenCV).
 Углы головы в градусах: yaw>0 — голова повёрнута вправо от камеры,
 pitch>0 — НАКЛОНЕНА ВНИЗ, roll>0 — завалена к правому плечу.
-Знак pitch задан здесь явно (см. euler_from_matrix), а не угадывается.
+Знак pitch задан явно (см. euler_from_matrix), а не угадывается.
 
 МАСШТАБ. Все расстояния по скелету нормируются на ШИРИНУ ПЛЕЧ. В аудитории
 бёдра почти всегда закрыты партой, а плечи видны — поэтому единица измерения
@@ -21,9 +27,19 @@ pitch>0 — НАКЛОНЕНА ВНИЗ, roll>0 — завалена к прав
 
 from __future__ import annotations
 
+import itertools
 import math
+import time
+from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
+
+
+# =====================================================================
+# 1. ГЕОМЕТРИЯ — измерения по одному кадру
+# =====================================================================
 
 # --- COCO-17: порядок точек, который отдаёт YOLO-pose ---------------------
 NOSE = 0
@@ -290,3 +306,238 @@ def iou(box_a, box_b) -> float:
     area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
     union = area_a + area_b - inter
     return float(inter / union) if union > 0 else 0.0
+
+
+# =====================================================================
+# 2. ТРЕКИНГ — один человек, один стабильный id
+# =====================================================================
+
+@dataclass
+class Track:
+    track_id: int
+    box: tuple[float, float, float, float]
+    last_seen: float
+    hits: int = 1
+
+
+class IouTracker:
+    """Трекер на одну камеру. Не потокобезопасен — вызывающий держит лок."""
+
+    def __init__(self, iou_threshold: float, max_age_s: float, min_hits: int):
+        self._iou_threshold = iou_threshold
+        self._max_age_s = max_age_s
+        self._min_hits = min_hits
+        self._tracks: dict[int, Track] = {}
+        self._ids = itertools.count(1)
+
+    def update(self, boxes: list[tuple[float, float, float, float]],
+               now: float | None = None) -> list[int]:
+        """Рамки текущего кадра -> id трека для каждой рамки (в том же порядке)."""
+        # perf_counter, а не monotonic: у monotonic на Windows шаг ~15 мс,
+        # и подряд идущие кадры получают одинаковую метку времени.
+        now = time.perf_counter() if now is None else now
+        self._expire(now)
+
+        track_ids = list(self._tracks)
+        assigned: list[int | None] = [None] * len(boxes)
+
+        if track_ids and boxes:
+            cost = np.ones((len(boxes), len(track_ids)), dtype=np.float64)
+            for i, box in enumerate(boxes):
+                for j, tid in enumerate(track_ids):
+                    cost[i, j] = 1.0 - iou(box, self._tracks[tid].box)
+
+            rows, cols = linear_sum_assignment(cost)
+            for i, j in zip(rows, cols):
+                if cost[i, j] <= 1.0 - self._iou_threshold:
+                    tid = track_ids[j]
+                    assigned[i] = tid
+                    track = self._tracks[tid]
+                    track.box = boxes[i]
+                    track.last_seen = now
+                    track.hits += 1
+
+        for i, tid in enumerate(assigned):
+            if tid is None:
+                new_id = next(self._ids)
+                self._tracks[new_id] = Track(new_id, boxes[i], now)
+                assigned[i] = new_id
+
+        return [tid for tid in assigned]      # type: ignore[misc]
+
+    def get(self, track_id: int) -> Track | None:
+        return self._tracks.get(track_id)
+
+    def is_confirmed(self, track_id: int) -> bool:
+        """Трек считается настоящим после min_hits кадров — режет одиночные ложняки."""
+        track = self._tracks.get(track_id)
+        return track is not None and track.hits >= self._min_hits
+
+    def _expire(self, now: float) -> None:
+        dead = [tid for tid, t in self._tracks.items()
+                if now - t.last_seen > self._max_age_s]
+        for tid in dead:
+            del self._tracks[tid]
+
+    @property
+    def active(self) -> int:
+        return len(self._tracks)
+
+
+# =====================================================================
+# 3. ОКНО — вовлечённость из статистики по времени
+# =====================================================================
+
+# Итоговые состояния человека, которые видит платформа.
+STATE_ENGAGED = "engaged"        # смотрит на доску
+STATE_WRITING = "writing"        # пишет (это тоже вовлечённость, но другого рода)
+STATE_PHONE = "phone"            # в телефоне
+STATE_SLEEPING = "sleeping"      # спит
+STATE_DISTRACTED = "distracted"  # отвлёкся: не спит, не пишет, но и не смотрит
+STATE_UNKNOWN = "unknown"        # лица не видно, судить не по чему
+
+
+class Sample:
+    """Один отсчёт по человеку. __slots__ — их тысячи на камеру."""
+
+    __slots__ = ("t", "looking", "eyes_closed", "posture", "posture_conf", "has_face")
+
+    def __init__(self, t, looking, eyes_closed, posture, posture_conf, has_face):
+        self.t = t
+        self.looking = looking
+        self.eyes_closed = eyes_closed
+        self.posture = posture
+        self.posture_conf = posture_conf
+        self.has_face = has_face
+
+
+class EngagementWindow:
+    """Кольцевой буфер отсчётов одного человека и выводы из него."""
+
+    def __init__(self, cfg):
+        self._cfg = cfg
+        self._samples: deque[Sample] = deque()
+        # Длительность ТЕКУЩЕГО непрерывного взгляда на доску и текущей серии
+        # закрытых глаз. Считаются нарастающе, а не пересчётом буфера: так
+        # непрерывный взгляд длиннее окна не обрезается окном.
+        self._gaze_start: float | None = None
+        self._closed_start: float | None = None
+        self._gaze_hold_s = 0.0
+        self._closed_run_s = 0.0
+
+    def add(self, sample: Sample) -> None:
+        self._samples.append(sample)
+        horizon = sample.t - self._cfg.engagement_window_s
+        while self._samples and self._samples[0].t < horizon:
+            self._samples.popleft()
+
+        if sample.looking:
+            self._gaze_start = sample.t if self._gaze_start is None else self._gaze_start
+            self._gaze_hold_s = sample.t - self._gaze_start
+        else:
+            self._gaze_start = None
+            self._gaze_hold_s = 0.0
+
+        if sample.eyes_closed:
+            self._closed_start = sample.t if self._closed_start is None else self._closed_start
+            self._closed_run_s = sample.t - self._closed_start
+        else:
+            self._closed_start = None
+            self._closed_run_s = 0.0
+
+    # --- производные величины ---------------------------------------------
+
+    @property
+    def gaze_hold_s(self) -> float:
+        """Сколько секунд длится ТЕКУЩИЙ непрерывный взгляд на доску."""
+        return round(self._gaze_hold_s, 2)
+
+    @property
+    def span_s(self) -> float:
+        """Сколько реально накоплено — пока меньше min_span, выводы ненадёжны."""
+        if len(self._samples) < 2:
+            return 0.0
+        return self._samples[-1].t - self._samples[0].t
+
+    def looking_ratio(self) -> float | None:
+        """Доля отсчётов с лицом, где человек смотрел на доску."""
+        seen = [s for s in self._samples if s.has_face]
+        if not seen:
+            return None
+        return sum(1 for s in seen if s.looking) / len(seen)
+
+    def perclos(self) -> float | None:
+        """Доля времени с закрытыми глазами за окно (0..1)."""
+        seen = [s for s in self._samples if s.has_face]
+        if len(seen) < self._cfg.engagement_min_samples:
+            return None
+        return sum(1 for s in seen if s.eyes_closed) / len(seen)
+
+    def posture_vote(self) -> tuple[str, float]:
+        """Активность за окно: голоса, взвешенные уверенностью правила."""
+        if not self._samples:
+            return POSTURE_NEUTRAL, 0.0
+        weights: dict[str, float] = {}
+        for s in self._samples:
+            weights[s.posture] = weights.get(s.posture, 0.0) + s.posture_conf
+        total = sum(weights.values())
+        if total <= 0:
+            return POSTURE_NEUTRAL, 0.0
+        best = max(weights, key=weights.get)
+        return best, weights[best] / total
+
+    def resolve(self) -> dict:
+        """Окно -> итог: состояние, скор вовлечённости и величины, из которых он вышел.
+
+        Порядок проверок = приоритет: сон важнее телефона, телефон важнее письма.
+        Письмо считается вовлечённостью — человек работает, просто не на доску.
+        """
+        cfg = self._cfg
+        ratio = self.looking_ratio()
+        perclos = self.perclos()
+        posture, posture_share = self.posture_vote()
+        faces = sum(1 for s in self._samples if s.has_face)
+        warmup = self.span_s < cfg.engagement_min_span_s
+
+        # Базовый скор: сколько смотрел + надбавка за НЕПРЕРЫВНОСТЬ взгляда.
+        # Без второго слагаемого «десять раз мазнул взглядом» равнялось бы
+        # «одному внимательному взгляду в полминуты», а это разные вещи.
+        hold = min(1.0, self._gaze_hold_s / cfg.engagement_hold_target_s)
+        score = (cfg.engagement_look_weight * (ratio or 0.0)
+                 + cfg.engagement_hold_weight * hold)
+
+        # 1) Сон. Два независимых пути: глаза видно (PERCLOS + непрерывная серия)
+        #    и глаза НЕ видно (голова лежит на парте — лица просто нет в кадре).
+        sleeping_by_eyes = (
+            perclos is not None and perclos >= cfg.sleep_perclos
+            and self._closed_run_s >= cfg.sleep_min_closed_s)
+        sleeping_by_pose = (
+            posture == POSTURE_SLUMPED and posture_share >= cfg.posture_vote_share
+            and not warmup)
+        if sleeping_by_eyes or sleeping_by_pose:
+            state, score = STATE_SLEEPING, 0.0
+        elif posture == POSTURE_PHONE and posture_share >= cfg.posture_vote_share:
+            state = STATE_PHONE
+            score *= cfg.engagement_phone_factor
+        elif posture == POSTURE_WRITING and posture_share >= cfg.posture_vote_share:
+            state = STATE_WRITING
+            score = max(score, cfg.engagement_writing_floor)
+        elif faces == 0:
+            state = STATE_UNKNOWN
+        elif ratio is not None and ratio >= cfg.engagement_looking_ratio:
+            state = STATE_ENGAGED
+        else:
+            state = STATE_DISTRACTED
+
+        return {
+            "state": state,
+            "engagement": round(min(1.0, max(0.0, score)), 4),
+            "gaze_hold_s": self.gaze_hold_s,
+            "looking_ratio": None if ratio is None else round(ratio, 4),
+            "perclos": None if perclos is None else round(perclos, 4),
+            "eyes_closed_s": round(self._closed_run_s, 2),
+            "activity": posture,
+            "activity_share": round(posture_share, 4),
+            "window_s": round(self.span_s, 2),
+            "warming_up": warmup,
+        }

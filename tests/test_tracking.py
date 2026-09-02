@@ -6,7 +6,7 @@
 
 import pytest
 
-from app.attention.tracking import IouTracker
+from app.attention.engagement import IouTracker
 
 
 @pytest.fixture

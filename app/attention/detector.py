@@ -33,12 +33,9 @@ import cv2
 import numpy as np
 import torch
 
-from app.attention import geometry as g
-from app.attention.model_face import FaceModel
-from app.attention.model_objects import PHONE, BOOK, LAPTOP, ObjectModel
-from app.attention.model_pose import PoseModel
-from app.attention.temporal import EngagementWindow, Sample
-from app.attention.tracking import IouTracker
+from app.attention import engagement as g
+from app.attention.engagement import EngagementWindow, IouTracker, Sample
+from app.attention.model import BOOK, LAPTOP, PHONE, FaceModel, ObjectModel, PoseModel
 from app.config import Settings
 
 logger = logging.getLogger("surveillance.attention")

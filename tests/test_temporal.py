@@ -2,9 +2,8 @@
 
 import pytest
 
-from app.attention.geometry import (
-    POSTURE_NEUTRAL, POSTURE_PHONE, POSTURE_SLUMPED, POSTURE_WRITING)
-from app.attention.temporal import (
+from app.attention.engagement import (
+    POSTURE_NEUTRAL, POSTURE_PHONE, POSTURE_SLUMPED, POSTURE_WRITING,
     STATE_DISTRACTED, STATE_ENGAGED, STATE_PHONE, STATE_SLEEPING,
     STATE_UNKNOWN, STATE_WRITING, EngagementWindow, Sample)
 

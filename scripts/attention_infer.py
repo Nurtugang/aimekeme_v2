@@ -34,7 +34,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.attention import geometry as gm            # noqa: E402
+from app.attention import engagement as gm          # noqa: E402
 from app.attention.detector import AttentionDetector  # noqa: E402
 from app.config import settings                     # noqa: E402
 

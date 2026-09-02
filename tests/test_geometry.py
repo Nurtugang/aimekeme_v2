@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from app.attention import geometry as g
+from app.attention import engagement as g
 
 
 def rot_x(deg):

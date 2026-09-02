@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from app.attention.detector import AttentionDetector
-from app.attention.model_face import FaceSignals
+from app.attention.model import FaceSignals
 
 
 class FakePose:

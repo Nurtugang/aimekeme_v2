@@ -32,13 +32,9 @@ app/
 ├── face/                   # model.py · detector.py · schemas.py · router.py
 ├── fire/                   # model_siglip2.py · model_yolo_dfire.py · detector.py · schemas.py · router.py
 ├── counting/               # model_frcnn.py · model_yolo_head.py · detector.py · schemas.py · router.py
-└── attention/              # вовлечённость: 5 моделей + время
-    ├── model_pose.py       # YOLO11-pose: скелеты COCO-17
-    ├── model_face.py       # MediaPipe FaceLandmarker: взгляд, глаза, углы головы
-    ├── model_objects.py    # YOLO11 COCO: телефон / книга / ноутбук
-    ├── geometry.py         # чистая математика: углы, позы, скор (тестируется без GPU)
-    ├── tracking.py         # трекинг по IoU: один человек — один id
-    ├── temporal.py         # окно по треку: длительность взгляда, PERCLOS, вовлечённость
+└── attention/              # вовлечённость на лекции
+    ├── model.py            # три готовые сети: YOLO11-pose, YOLO11 COCO, MediaPipe
+    ├── engagement.py       # геометрия + трекинг + окно; без моделей, тестируется без GPU
     └── detector.py · schemas.py · router.py
 known_faces/                # мини-база лиц: <id>_<k>.jpg + faces.db (см. known_faces/README.md)
 tests/                      # pytest: геометрия, трекинг, окна, сборка детектора (без GPU)
