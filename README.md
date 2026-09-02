@@ -14,6 +14,11 @@
   `COUNT_MODEL`): `frcnn` — torchvision Faster R-CNN, класс person (BSD, по умолчанию);
   `yolo_head` — YOLOv8-детектор голов на SCUT-HEAD, точнее в толпе (ultralytics, AGPL).
   `count` = число боксов выше порога.
+- **attention** — вовлечённость на лекции. Единственный модуль, который смотрит
+  не на кадр, а на человека во времени: по каждому находит скелет (YOLO11-pose),
+  направление взгляда (MediaPipe FaceLandmarker), предметы в руках (YOLO11/COCO)
+  и накапливает окно в 30 с. Отвечает, кто вовлечён, кто спит, кто пишет, а кто
+  сидит в телефоне. **Stateful** — см. раздел про эндпоинт.
 
 Все модели грузятся **один раз при старте** (lifespan) и складываются в реестр;
 
@@ -26,10 +31,26 @@ app/
 ├── fight/                  # model.py · detector.py · schemas.py · router.py
 ├── face/                   # model.py · detector.py · schemas.py · router.py
 ├── fire/                   # model_siglip2.py · model_yolo_dfire.py · detector.py · schemas.py · router.py
-└── counting/               # model_frcnn.py · model_yolo_head.py · detector.py · schemas.py · router.py
+├── counting/               # model_frcnn.py · model_yolo_head.py · detector.py · schemas.py · router.py
+└── attention/              # вовлечённость: 5 моделей + время
+    ├── model_pose.py       # YOLO11-pose: скелеты COCO-17
+    ├── model_face.py       # MediaPipe FaceLandmarker: взгляд, глаза, углы головы
+    ├── model_objects.py    # YOLO11 COCO: телефон / книга / ноутбук
+    ├── geometry.py         # чистая математика: углы, позы, скор (тестируется без GPU)
+    ├── tracking.py         # трекинг по IoU: один человек — один id
+    ├── temporal.py         # окно по треку: длительность взгляда, PERCLOS, вовлечённость
+    └── detector.py · schemas.py · router.py
 known_faces/                # мини-база лиц: <id>_<k>.jpg + faces.db (см. known_faces/README.md)
+tests/                      # pytest: геометрия, трекинг, окна, сборка детектора (без GPU)
 scripts/
-├── build_payload.py        # нарезает видео на окна по 16 кадров для тестов fight
+├── fight_build_payload.py  # нарезает видео на окна по 16 кадров для тестов fight
+├── fight_infer.py          # офлайн-инференс драк
+├── fire_infer.py           # офлайн-инференс огня/дыма
+├── counting_infer.py       # офлайн-инференс подсчёта людей
+├── attention_calibrate.py  # ЗАМЕР углов под свою камеру -> готовые строки для .env
+├── attention_infer.py      # офлайн-инференс вовлечённости (камера/видео/фото)
+├── attention_request.py    # проверка живого POST /detect/attention по HTTP
+├── extract_frames.py       # нарезка видео на кадры
 └── encode_image.py         # фото -> JSON для теста /detect/face
 ```
 
@@ -52,7 +73,9 @@ python3.10 -m venv venv && source venv/bin/activate
 #    "counting: yolo_head backend" из req.txt перед установкой.
 pip install -r req.txt
 
-# 2) распознавание лиц (ArcFace). Ставить ИМЕННО в этом порядке:
+# 2) распознавание лиц (ArcFace) — нужен и модулю face, и модулю attention
+#    (attention берёт из того же пака buffalo_l детектор лиц + 3D-landmarks).
+#    Ставить ИМЕННО в этом порядке:
 pip install onnxruntime-gpu==1.23.2
 pip install --no-deps insightface==1.0.1
 pip install onnx scipy scikit-image
@@ -142,6 +165,77 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 для обеих моделей (`COUNT_MODEL` = `frcnn` | `yolo_head`) — контракт не меняется.
 Ошибки (HTTP 422): `Invalid base64 image`.
 
+### `POST /detect/attention`
+Оценка вовлечённости на лекции: взгляд, его длительность, сон, письмо, телефон.
+
+Запрос — кадр и **идентификатор камеры**:
+```json
+{ "frame": "<base64_jpg>", "camera_id": "aud_301" }
+```
+Ответ:
+```json
+{
+  "people": [
+    { "track_id": 7, "box": [x1, y1, x2, y2],
+      "keypoints": [[x, y, conf], "... 17 точек COCO ..."],
+      "state": "phone", "engagement": 0.14,
+      "gaze_yaw": -31.2, "gaze_pitch": 24.8,
+      "head_yaw": -22.0, "head_pitch": 19.5, "eye_closure": 0.08,
+      "attention_score": 0.21, "looking_now": false,
+      "gaze_hold_s": 0.0, "looking_ratio": 0.12, "perclos": 0.04,
+      "eyes_closed_s": 0.0,
+      "activity": "phone", "activity_share": 0.87,
+      "held_objects": ["cell phone"],
+      "window_s": 30.0, "warming_up": false }
+  ],
+  "count": 24, "engaged_count": 17,
+  "engagement_rate": 0.7083, "mean_engagement": 0.6612,
+  "states": { "engaged": 15, "writing": 2, "phone": 4, "distracted": 2, "sleeping": 1 },
+  "processing_ms": 78.0
+}
+```
+
+**Состояния** (`state`) в порядке приоритета: `sleeping` → `phone` → `writing` →
+`engaged` → `distracted` → `unknown` (лица не видно и поза ни о чём не говорит).
+Письмо считается вовлечённостью: человек работает, просто не смотрит на доску.
+
+**Как определяется что:**
+
+| Признак | Откуда |
+|---|---|
+| направление взгляда | углы головы (матрица MediaPipe) + смещение зрачков (`eyeLook*`) |
+| длительность взгляда | `gaze_hold_s` — текущая непрерывная серия, не обрезается окном |
+| сон | PERCLOS ≥ `SLEEP_PERCLOS` и непрерывная серия закрытых глаз ≥ `SLEEP_MIN_CLOSED_S`; **или** голова на парте, когда лица не видно вовсе |
+| телефон | `cell phone` детектором COCO рядом с кистью; запасной вариант — поза |
+| письмо | `book`/`laptop` у кисти или кисть лежит низко на парте ниже локтя |
+
+**`camera_id` обязателен по смыслу.** Треки и временные окна ведутся отдельно на
+каждую камеру. Если слать все потоки с одним id, люди с разных камер начнут
+сопоставляться друг с другом; если слать каждый кадр с новым id, окно никогда
+не наберётся и все останутся `warming_up`.
+
+**Скелет не дублируется.** Первичный ключ — трек, а не детекция: NMS внутри YOLO
+оставляет по одной рамке на человека, трекер сводит её к постоянному `track_id`,
+и лицо считается на кропе головы ЭТОГО трека. Двум скелетам на одном человеке
+взяться неоткуда — это свойство архитектуры, а не постфильтра, и оно закреплено
+тестами `tests/test_detector.py::TestNoDuplicates`.
+
+**Модуль stateful** — единственный в сервисе. Это осознанный отход от правила 3
+`docs/CONVENTIONS.md`: длительность взгляда по одному кадру не вычислима.
+Состояние ограничено — окно `ENGAGEMENT_WINDOW_S`, TTL трека `TRACK_MAX_AGE_S`,
+предел `MAX_CAMERAS`; мгновенные значения (`looking_now`, `attention_score`,
+`head_*`) в ответе есть, поэтому брокер при желании считает своё поверх них.
+
+Первые секунды после появления человека `warming_up: true` — окно ещё набирается,
+выводам верить рано.
+
+Ошибки (HTTP 422): `Invalid base64 image`.
+
+> **Калибровка обязательна.** Углы «на доску» зависят от того, где висит камера.
+> `python scripts/attention_calibrate.py` замеряет их и печатает готовые строки
+> для `.env`, заодно проверяя знаки. Без калибровки при камере сбоку вся
+> аудитория будет `distracted`.
+
 ### База лиц (enrollment)
 
 Эталоны лиц хранятся в этом сервисе (`known_faces/`). Управление — через API.
@@ -176,6 +270,34 @@ curl -X POST http://localhost:8000/detect/fight \
      -d @test/file_000001/window_0000_f000000-000015/payload.json
 ```
 
+## Быстрая проверка (attention)
+
+```bash
+# 1. КАЛИБРОВКА. Смотрите на доску -> `c`; на левый край аудитории -> `l`;
+#    на правый -> `r`; выход -> `q`. Скрипт напечатает строки для .env
+#    и проверит, что знак угла не перевёрнут.
+python scripts/attention_calibrate.py
+
+# 2. ОФЛАЙН той же моделью, что в API. Камера — живое окно со скелетами.
+python scripts/attention_infer.py 0 camera
+python scripts/attention_infer.py lecture.mp4 video --pose-variant x --pose-imgsz 1600
+python scripts/attention_infer.py row3.jpg photo --no-objects
+
+# 3. ЖИВОЙ ЭНДПОИНТ (сервис поднят). Серия кадров на один camera_id — так же,
+#    как это делал бы брокер.
+python scripts/attention_request.py 0 --frames 60 --interval 0.5
+
+# 4. ТЕСТЫ логики — без GPU и без весов, доли секунды.
+python -m pytest tests/ -q
+```
+
+Оценка вовлечённости требует ВРЕМЕНИ: на одиночном фото все будут `warming_up`,
+а состояния — предварительными. Фото годится проверить скелеты и углы, не выводы.
+
+Если после калибровки аудитория всё равно `distracted` — поднимите
+`ATTENTION_YAW_TOLERANCE`: в широком зале крайние ряды смотрят на доску под
+заметным углом.
+
 ## Конфигурация
 
 Переопределяется через переменные окружения или `.env` (см. `.env.example`):
@@ -193,6 +315,27 @@ curl -X POST http://localhost:8000/detect/fight \
 | `FACE_MATCH_THRESHOLD` | `0.42`        | косинусная близость (ArcFace) >= порог ⇒ узнан  |
 | `FACE_DET_THRESH`      | `0.5`         | порог детектора лиц (insightface)               |
 | `KNOWN_FACES_DIR`      | `known_faces` | папка с эталонами лиц                           |
+| `ATTENTION_YAW_CENTER` / `_PITCH_CENTER` | `0.0` | направление «на доску» (калибровка) |
+| `ATTENTION_YAW_TOLERANCE` / `_PITCH_TOLERANCE` | `25` / `20` | допуск по взгляду, градусы |
+| `ATTENTION_THRESHOLD`  | `0.5`  | `score >= threshold` ⇒ смотрит (0.5 = граница допуска) |
+| `GAZE_EYE_GAIN`        | `25.0` | вклад смещения зрачков во взгляд, градусов      |
+| `POSE_VARIANT`         | `x`    | размер YOLO11-pose: `n`…`x`                     |
+| `POSE_IMGSZ`           | `1280` | вход детектора поз (для 4К осмысленно `1600`)   |
+| `OBJECT_ENABLED`       | `true` | искать телефон/книгу/ноутбук отдельным детектором |
+| `OBJECT_IMGSZ`         | `1600` | вход детектора предметов — телефон мелкий        |
+| `OBJECT_HAND_RADIUS`   | `0.9`  | радиус привязки предмета к кисти, в ширинах плеч |
+| `TRACK_IOU_THRESHOLD`  | `0.3`  | порог сопоставления треков                      |
+| `TRACK_MAX_AGE_S`      | `3.0`  | сколько трек живёт без обновлений, с            |
+| `MAX_CAMERAS`          | `32`   | предел одновременных камер (память состояния)   |
+| `ENGAGEMENT_WINDOW_S`  | `30.0` | окно, за которое считается вовлечённость, с     |
+| `ENGAGEMENT_LOOKING_RATIO` | `0.5` | доля окна со взглядом ⇒ `engaged`            |
+| `ENGAGEMENT_HOLD_TARGET_S` | `5.0` | непрерывный взгляд, дающий полный бонус      |
+| `ENGAGEMENT_WRITING_FLOOR` | `0.6` | письмо — тоже вовлечённость, не ниже этого   |
+| `ENGAGEMENT_PHONE_FACTOR`  | `0.2` | множитель-штраф за телефон                   |
+| `SLEEP_EYE_CLOSURE`    | `0.55` | `eyeBlink` выше ⇒ глаз считается закрытым       |
+| `SLEEP_PERCLOS`        | `0.7`  | доля закрытых глаз за окно ⇒ сон                |
+| `SLEEP_MIN_CLOSED_S`   | `3.0`  | непрерывная серия, чтобы не считать моргания    |
+| `POSTURE_*`            | —      | пороги поз в ширинах плеч, **эвристики** (см. `.env.example`) |
 
 Число кадров (`expected_frames = 16`) задано в `app/config.py` — это требование модели.
 

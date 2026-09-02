@@ -8,3 +8,7 @@ CLAUDE.md
 # Игнорируем файлы с лицами, оставляем только README.md для примера структуры папки.
 known_faces/*
 !known_faces/README.md
+# Кеш pytest и артефакты офлайн-скриптов
+.pytest_cache/
+*_attention.mp4
+*_attention.jpg

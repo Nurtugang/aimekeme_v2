@@ -12,6 +12,8 @@ import torch
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from app.attention.detector import AttentionDetector
+from app.attention.router import router as attention_router
 from app.counting.detector import CountingDetector
 from app.counting.router import router as counting_router
 from app.face.detector import FaceDetector
@@ -54,12 +56,16 @@ async def lifespan(app: FastAPI):
     counting = CountingDetector(settings, device)
     counting.load()
 
+    attention = AttentionDetector(settings, device)
+    attention.load()
+
     # Кладём готовые модели на app.state — отсюда их берут роутеры.
     app.state.detectors = {
         "fight": fight,
         "face": face,
         "fire": fire,
         "counting": counting,
+        "attention": attention,
     }
 
     yield
@@ -68,7 +74,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Intelligent Surveillance API",
     description="Алгоритмы видеонаблюдения: детекция драк, распознавание лиц, "
-    "детекция огня/дыма и подсчёт людей.",
+    "детекция огня/дыма, подсчёт людей и оценка сосредоточенности на лекции.",
     version=settings.api_version,
     lifespan=lifespan,
 )
@@ -77,6 +83,7 @@ app.include_router(fight_router)
 app.include_router(face_router)
 app.include_router(fire_router)
 app.include_router(counting_router)
+app.include_router(attention_router)
 
 
 class ModelHealth(BaseModel):
