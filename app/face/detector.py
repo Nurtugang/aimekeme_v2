@@ -12,8 +12,7 @@
 
 CRUD по базе идёт через API (router.py) и обновляет её вживую, без рестарта.
 predict на 1 кадр: insightface находит лица -> эмбеддинг каждого -> сравнение с базой.
-Вместе с эмбеддингом модуль genderage отдаёт пол и возраст — уходят в ответ как есть,
-на распознавание не влияют (список моделей — в app/face/model.py).
+Пол и возраст идут в ответ как есть, на распознавание не влияют.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-from app.face.model import load_face_model
+from app.face.model import detect_faces, load_face_model
 from app.config import Settings
 
 logger = logging.getLogger("surveillance.face")
@@ -161,7 +160,7 @@ class FaceDetector:
     def _get_faces(self, bgr: np.ndarray) -> list:
         """Все лица на кадре (с фильтром по det_thresh), под локом GPU."""
         with self._lock:
-            faces = self._app.get(bgr)
+            faces = detect_faces(self._app, bgr)
         thr = self._settings.face_det_thresh
         return [f for f in faces if float(f.det_score) >= thr]
 
@@ -290,8 +289,7 @@ class FaceDetector:
         faces_out: list[dict] = []
         for f in faces:
             identity, identity_id, similarity = self._match(f.normed_embedding)
-            # sex/age даёт модуль genderage; getattr — на случай, если он не загружен.
-            age = getattr(f, "age", None)
+            age = getattr(f, "age", None)  # None, если genderage выключен
             faces_out.append({
                 "box": [float(v) for v in f.bbox.tolist()],
                 "det_confidence": round(float(f.det_score), 4),
