@@ -1,5 +1,7 @@
 """Pydantic-модели запроса/ответа для распознавания и базы лиц."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -9,6 +11,12 @@ class FaceBox(BaseModel):
     identity: str = Field(..., description="Имя из базы или 'unknown'.")
     identity_id: int | None = Field(None, description="ID записи из базы или null, если 'unknown'.")
     similarity: float = Field(..., description="Косинусная близость к ближайшему лицу из базы.")
+    sex: Literal["M", "F"] | None = Field(
+        None, description="Пол по кадру (genderage). null, если модель не дала ответ."
+    )
+    age: int | None = Field(
+        None, description="Возраст по кадру (genderage), годы. Оценка грубая, ±5-10 лет."
+    )
 
 
 class FaceRequest(BaseModel):

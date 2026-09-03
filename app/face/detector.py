@@ -12,6 +12,8 @@
 
 CRUD по базе идёт через API (router.py) и обновляет её вживую, без рестарта.
 predict на 1 кадр: insightface находит лица -> эмбеддинг каждого -> сравнение с базой.
+Вместе с эмбеддингом модуль genderage отдаёт пол и возраст — уходят в ответ как есть,
+на распознавание не влияют (список моделей — в app/face/model.py).
 """
 
 from __future__ import annotations
@@ -288,12 +290,16 @@ class FaceDetector:
         faces_out: list[dict] = []
         for f in faces:
             identity, identity_id, similarity = self._match(f.normed_embedding)
+            # sex/age даёт модуль genderage; getattr — на случай, если он не загружен.
+            age = getattr(f, "age", None)
             faces_out.append({
                 "box": [float(v) for v in f.bbox.tolist()],
                 "det_confidence": round(float(f.det_score), 4),
                 "identity": identity,
                 "identity_id": identity_id,
                 "similarity": round(similarity, 4),
+                "sex": getattr(f, "sex", None),
+                "age": int(age) if age is not None else None,
             })
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
