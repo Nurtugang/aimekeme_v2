@@ -20,6 +20,8 @@ from app.fight.detector import FightDetector
 from app.fight.router import router as fight_router
 from app.fire.detector import FireDetector
 from app.fire.router import router as fire_router
+from app.persons.detector import PersonsDetector
+from app.persons.router import router as persons_router
 from app.config import settings
 
 # Глобальная настройка логирования.
@@ -54,12 +56,16 @@ async def lifespan(app: FastAPI):
     counting = CountingDetector(settings, device)
     counting.load()
 
+    persons = PersonsDetector(settings, device)
+    persons.load()
+
     # Кладём готовые модели на app.state — отсюда их берут роутеры.
     app.state.detectors = {
         "fight": fight,
         "face": face,
         "fire": fire,
         "counting": counting,
+        "persons": persons,
     }
 
     yield
@@ -68,7 +74,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Intelligent Surveillance API",
     description="Алгоритмы видеонаблюдения: детекция драк, распознавание лиц, "
-    "детекция огня/дыма и подсчёт людей.",
+    "детекция огня/дыма, подсчёт людей и детекция людей с цветом одежды.",
     version=settings.api_version,
     lifespan=lifespan,
 )
@@ -77,6 +83,7 @@ app.include_router(fight_router)
 app.include_router(face_router)
 app.include_router(fire_router)
 app.include_router(counting_router)
+app.include_router(persons_router)
 
 
 class ModelHealth(BaseModel):
