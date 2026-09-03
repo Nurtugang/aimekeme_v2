@@ -36,7 +36,7 @@ from app.config import Settings
 # Кеш весов YOLO
 # =====================================================================
 
-logger = logging.getLogger("surveillance.attention.weights")
+_log_weights = logging.getLogger("surveillance.attention.weights")
 
 CACHE_ROOT = Path.home() / ".cache" / "aimekeme"
 
@@ -60,9 +60,9 @@ def cached_yolo(name: str, subdir: str):
             # на разных дисках, а os.replace через границу тома не работает
             # (на Windows это WinError 17).
             shutil.move(str(downloaded), str(target))
-            logger.info("Веса перенесены в кеш: %s", target)
+            _log_weights.info("Веса перенесены в кеш: %s", target)
         except OSError as exc:  # права, занятый файл — не критично
-            logger.warning("Не удалось перенести %s в %s: %s", downloaded, target, exc)
+            _log_weights.warning("Не удалось перенести %s в %s: %s", downloaded, target, exc)
     return model
 
 
@@ -70,7 +70,7 @@ def cached_yolo(name: str, subdir: str):
 # Скелеты: YOLO11-pose
 # =====================================================================
 
-logger = logging.getLogger("surveillance.attention.pose")
+_log_pose = logging.getLogger("surveillance.attention.pose")
 
 _VARIANTS = ("n", "s", "m", "l", "x")
 _PERSON_CLASS = 0
@@ -92,7 +92,7 @@ class PoseModel:
 
         self._model = cached_yolo(f"yolo11{variant}-pose.pt", "pose")
         self._model.to(self._device)
-        logger.info("YOLO11%s-pose готов на %s", variant, self._device)
+        _log_pose.info("YOLO11%s-pose готов на %s", variant, self._device)
 
     @property
     def is_ready(self) -> bool:
@@ -126,7 +126,7 @@ class PoseModel:
 # Предметы в руках: YOLO11 COCO
 # =====================================================================
 
-logger = logging.getLogger("surveillance.attention.objects")
+_log_objects = logging.getLogger("surveillance.attention.objects")
 
 # Классы COCO, которые говорят об активности студента.
 PHONE, BOOK, LAPTOP = "cell phone", "book", "laptop"
@@ -153,9 +153,9 @@ class ObjectModel:
         self._class_ids = [by_name[n] for n in _WANTED if n in by_name]
         missing = [n for n in _WANTED if n not in by_name]
         if missing:
-            logger.warning("В модели нет классов %s — они не будут находиться", missing)
-        logger.info("YOLO11%s (COCO) готов на %s, классы: %s",
-                    variant, self._device, [self._names[i] for i in self._class_ids])
+            _log_objects.warning("В модели нет классов %s — они не будут находиться", missing)
+        _log_objects.info("YOLO11%s (COCO) готов на %s, классы: %s",
+                          variant, self._device, [self._names[i] for i in self._class_ids])
 
     @property
     def is_ready(self) -> bool:
@@ -186,7 +186,7 @@ class ObjectModel:
 # Лицо, глаза, взгляд: MediaPipe FaceLandmarker
 # =====================================================================
 
-logger = logging.getLogger("surveillance.attention.face")
+_log_face = logging.getLogger("surveillance.attention.face")
 
 _CACHE_DIR = Path.home() / ".cache" / "aimekeme" / "mediapipe"
 _BUNDLE = "face_landmarker.task"
@@ -237,14 +237,14 @@ class FaceModel:
         )
         self._landmarker = vision.FaceLandmarker.create_from_options(options)
         self._mp = mp
-        logger.info("MediaPipe FaceLandmarker готов (%s)", path.name)
+        _log_face.info("MediaPipe FaceLandmarker готов (%s)", path.name)
 
     @staticmethod
     def _ensure_bundle() -> Path:
         path = _CACHE_DIR / _BUNDLE
         if not path.exists():
             _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            logger.info("Качаю бандл FaceLandmarker: %s -> %s", _URL, path)
+            _log_face.info("Качаю бандл FaceLandmarker: %s -> %s", _URL, path)
             tmp = path.with_suffix(".part")
             urllib.request.urlretrieve(_URL, tmp)  # noqa: S310 -- фиксированный URL Google
             tmp.rename(path)
@@ -293,9 +293,9 @@ class FaceModel:
         self._checked_names = True
         missing = [n for n in (*_BLINK, *_LOOK) if n not in shapes]
         if missing:
-            logger.error(
+            _log_face.error(
                 "FaceLandmarker не отдал blendshapes %s. Есть: %s. "
                 "Взгляд и сон считаться не будут — проверьте версию бандла.",
                 missing, sorted(shapes))
         else:
-            logger.info("Blendshapes на месте: %d коэффициентов", len(shapes))
+            _log_face.info("Blendshapes на месте: %d коэффициентов", len(shapes))
