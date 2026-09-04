@@ -12,9 +12,15 @@ class PersonBox(BaseModel):
     top_hsv: list[float] = Field(
         ..., description="Сырой HSV верха: [hue 0-360, saturation 0-1, value 0-1]."
     )
-    bottom_color: str = Field(..., description="Ближайшее название цвета низа из палитры.")
-    bottom_hsv: list[float] = Field(
-        ..., description="Сырой HSV низа: [hue 0-360, saturation 0-1, value 0-1]."
+    bottom_visible: bool = Field(
+        ..., description="Виден ли низ (колени в кадре). false -- человек сидит или обрезан."
+    )
+    bottom_color: str | None = Field(
+        None, description="Название цвета низа из палитры; null, если низ не виден."
+    )
+    bottom_hsv: list[float] | None = Field(
+        None,
+        description="Сырой HSV низа: [hue 0-360, saturation 0-1, value 0-1]; null, если не виден.",
     )
 
 
@@ -25,7 +31,11 @@ class FrameResult(BaseModel):
 
 class PersonsQuery(BaseModel):
     top: str | None = Field(None, description="Оставить только людей с таким цветом верха.")
-    bottom: str | None = Field(None, description="Оставить только людей с таким цветом низа.")
+    bottom: str | None = Field(
+        None,
+        description="Оставить только людей с таким цветом низа. Люди с невидимым низом "
+                    "(bottom_visible=false) остаются в выдаче как кандидаты.",
+    )
 
 
 class PersonsRequest(BaseModel):
