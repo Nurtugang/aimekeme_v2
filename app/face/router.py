@@ -1,6 +1,6 @@
 """HTTP-роуты лиц.
 
-- POST   /detect/face         — распознать лица в кадре (поток от брокера, base64);
+- POST   /detect/face         — распознать лица в кадре или в пачке кадров (base64);
 - POST   /faces               — записать человека (multipart, 1..N фото);
 - POST   /faces/{id}/images   — догрузить ещё фото существующему человеку;
 - GET    /faces               — список записанных (метаданные + кол-во фото);
@@ -27,7 +27,7 @@ from app.face.detector import (
     FaceNotFoundError,
     InvalidImageError,
 )
-from app.face.schemas import FaceRecord, FaceRequest, FaceResponse
+from app.face.schemas import FaceBatchResponse, FaceRecord, FaceRequest, FaceResponse
 
 router = APIRouter(tags=["face"])
 
@@ -46,19 +46,24 @@ def _read_images(files: list[UploadFile]) -> list[bytes]:
     return data
 
 
-@router.post("/detect/face", response_model=FaceResponse)
-def detect_face(payload: FaceRequest, request: Request) -> FaceResponse:
-    """Находит лица в кадре и сопоставляет с базой known_faces/."""
+@router.post("/detect/face", response_model=FaceResponse | FaceBatchResponse)
+def detect_face(payload: FaceRequest, request: Request) -> FaceResponse | FaceBatchResponse:
+    """Находит лица и сопоставляет с базой known_faces/.
+
+    Принимает либо один кадр (`frame`) — ответ `{faces, count, processing_ms}`,
+    либо пачку (`frames`) — ответ `{results: [{faces, count}, ...], processing_ms}`
+    в том же порядке, что и кадры.
+    """
     detector = request.app.state.detectors["face"]
     try:
-        result = detector.predict(payload.frame)
+        if payload.frames is not None:
+            return FaceBatchResponse(**detector.predict_batch(payload.frames))
+        return FaceResponse(**detector.predict(payload.frame))
     except InvalidImageError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Invalid base64 image",
+            detail=str(exc) or "Invalid base64 image",
         ) from exc
-
-    return FaceResponse(**result)
 
 
 @router.post("/faces", response_model=FaceRecord, status_code=status.HTTP_201_CREATED)

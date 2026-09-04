@@ -94,7 +94,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 Ошибки (HTTP 422): `Expected 16 frames, got 10` · `Invalid base64 in frame 3`.
 
 ### `POST /detect/face`
-Запрос — один base64-JPEG кадр:
+Запрос — **либо** один base64-JPEG кадр:
 ```json
 { "frame": "<base64_jpg>" }
 ```
@@ -109,8 +109,28 @@ uvicorn app:app --host 0.0.0.0 --port 8000
   "processing_ms": 18.0
 }
 ```
+**Либо** пачка независимых кадров одним запросом (PTZ-камера обходит зоны
+аудитории с зумом — дальние ряды узнаются лучше, чем на одном широком кадре):
+```json
+{ "frames": ["<base64_jpg>", "<base64_jpg>", "..."] }
+```
+```json
+{
+  "results": [
+    { "faces": [ ... ], "count": 2 },
+    { "faces": [], "count": 0 }
+  ],
+  "processing_ms": 31.4
+}
+```
+Порядок `results` = порядок присланных кадров; `processing_ms` — общее время на
+всю пачку. Кадры между собой не связаны, каждый считается сам по себе — пачка
+экономит не GPU-время (детекция всё равно покадровая), а походы в очередь к
+модели: один заход вместо N. Ровно одно из полей `frame`/`frames` (оба сразу
+или ни одного — 422).
+
 `identity` — имя или `"unknown"`; `identity_id` — стабильный ID человека или `null`.
-Ошибки (HTTP 422): `Invalid base64 image`.
+Ошибки (HTTP 422): `Invalid base64 image` · `Invalid base64 in frame 2` (индекс с нуля).
 
 ### `POST /detect/fire`
 Запрос — один base64-JPEG кадр:

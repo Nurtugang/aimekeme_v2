@@ -28,7 +28,8 @@
 ### Контракт AI-API (Не меняется!)
 
 * `POST /detect/fight` — `{ "frames": [16 × base64_jpg] }` → `{ label, confidence, processing_ms }`
-* `POST /detect/face` — `{ "frame": base64_jpg }` → `{ faces:[{box, det_confidence, identity, identity_id, similarity}], count, processing_ms }` (`identity` = имя или `"unknown"`; `identity_id` = ID человека или `null`).
+* `POST /detect/face` — `{ "frame": base64_jpg }` → `{ faces:[{box, det_confidence, identity, identity_id, similarity, sex, age}], count, processing_ms }` (`identity` = имя или `"unknown"`; `identity_id` = ID человека или `null`).
+  * Пачкой: `{ "frames": [base64_jpg, ...] }` → `{ results: [{faces, count}, ...], processing_ms }`, порядок = порядок кадров. Для PTZ-обхода зон: копите кадры зон и шлите одним запросом вместо N отдельных.
 * `POST /detect/fire` — `{ "frame": base64_jpg }` → `{ label, confidence, processing_ms }` (`fire` / `smoke` / `normal`).
 * `POST /detect/counting` — `{ "frame": base64_jpg }` → `{ label:"person", count, confidence, processing_ms }`.
 * `GET /health`

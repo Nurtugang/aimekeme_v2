@@ -12,6 +12,8 @@
 
 CRUD по базе идёт через API (router.py) и обновляет её вживую, без рестарта.
 predict на 1 кадр: insightface находит лица -> эмбеддинг каждого -> сравнение с базой.
+predict_batch — то же самое на пачке независимых кадров (PTZ обходит зоны), но лок
+GPU берётся один раз на всю пачку.
 Пол и возраст идут в ответ как есть, на распознавание не влияют.
 """
 
@@ -161,6 +163,9 @@ class FaceDetector:
         """Все лица на кадре (с фильтром по det_thresh), под локом GPU."""
         with self._lock:
             faces = detect_faces(self._app, bgr)
+        return self._filter(faces)
+
+    def _filter(self, faces: list) -> list:
         thr = self._settings.face_det_thresh
         return [f for f in faces if float(f.det_score) >= thr]
 
@@ -284,8 +289,54 @@ class FaceDetector:
 
         start = time.perf_counter()
         bgr = self._decode(frame)
-        faces = self._get_faces(bgr)
+        faces_out = self._format(self._get_faces(bgr))
 
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        self._log(faces_out, len(faces_out), elapsed_ms)
+
+        return {
+            "faces": faces_out,
+            "count": len(faces_out),
+            "processing_ms": round(elapsed_ms, 2),
+        }
+
+    def predict_batch(self, frames: list[str]) -> dict:
+        """Пачка независимых кадров за один заход в очередь GPU.
+
+        Кадры не связаны между собой (PTZ обходит зоны) — каждый обсчитывается
+        сам по себе, порядок результатов = порядок кадров. Смысл пачки не в
+        батче по модели (детекция в insightface всё равно покадровая), а в одном
+        захвате лока на всю пачку вместо N раз.
+
+        Raises:
+            InvalidImageError: если какой-то кадр не валидный base64/JPEG.
+        """
+        if self._app is None:
+            raise RuntimeError("Model is not loaded")
+
+        start = time.perf_counter()
+        # Декодируем всё заранее: битый кадр упадёт, не заняв GPU.
+        bgrs = [self._decode(raw, i) for i, raw in enumerate(frames)]
+
+        with self._lock:
+            per_frame = [detect_faces(self._app, bgr) for bgr in bgrs]
+
+        results = []
+        for faces in per_frame:
+            faces_out = self._format(self._filter(faces))
+            results.append({"faces": faces_out, "count": len(faces_out)})
+
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        all_faces = [f for r in results for f in r["faces"]]
+        self._log(all_faces, len(frames), elapsed_ms)
+
+        return {
+            "results": results,
+            "processing_ms": round(elapsed_ms, 2),
+        }
+
+    def _format(self, faces: list) -> list[dict]:
+        """Лица insightface -> тело ответа (сопоставление с базой + пол/возраст)."""
         faces_out: list[dict] = []
         for f in faces:
             identity, identity_id, similarity = self._match(f.normed_embedding)
@@ -299,19 +350,17 @@ class FaceDetector:
                 "sex": getattr(f, "sex", None),
                 "age": int(age) if age is not None else None,
             })
+        return faces_out
 
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
+    @staticmethod
+    def _log(faces_out: list[dict], n_frames: int, elapsed_ms: float) -> None:
         recognized = [f["identity"] for f in faces_out if f["identity"] != _UNKNOWN]
         if recognized:
-            logger.info("Recognized %s (%.1f ms)", recognized, elapsed_ms)
+            logger.info("Recognized %s in %d frame(s) (%.1f ms)",
+                        recognized, n_frames, elapsed_ms)
         else:
-            logger.debug("faces=%d, none recognized (%.1f ms)", len(faces_out), elapsed_ms)
-
-        return {
-            "faces": faces_out,
-            "count": len(faces_out),
-            "processing_ms": round(elapsed_ms, 2),
-        }
+            logger.debug("faces=%d in %d frame(s), none recognized (%.1f ms)",
+                         len(faces_out), n_frames, elapsed_ms)
 
     def _match(self, embedding: np.ndarray) -> tuple[str, int | None, float]:
         """Максимум косинусной близости по всем эталонам каждого человека."""
@@ -347,14 +396,17 @@ class FaceDetector:
         return np.asarray(pil)[:, :, ::-1].copy()
 
     @staticmethod
-    def _decode(raw: str) -> np.ndarray:
+    def _decode(raw: str, index: int | None = None) -> np.ndarray:
+        """base64 JPEG -> BGR. index (0-based) указывает кадр в пачке для сообщения."""
+        detail = ("Invalid base64 image" if index is None
+                  else f"Invalid base64 in frame {index}")
         if _DATA_URI_MARKER in raw:
             raw = raw.split(_DATA_URI_MARKER, 1)[1]
         try:
             data = base64.b64decode(raw, validate=True)
         except (binascii.Error, ValueError) as exc:
-            raise InvalidImageError() from exc
+            raise InvalidImageError(detail) from exc
         image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
-            raise InvalidImageError()
+            raise InvalidImageError(detail)
         return image
