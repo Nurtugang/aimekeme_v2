@@ -1,8 +1,14 @@
-"""Детекция людей + оценка цвета одежды (верх/низ) по пачке кадров.
+"""Детекция людей + оценка цвета одежды (верх/низ) по окну кадров одной камеры.
 
-YOLOv8n-pose (model.py) находит людей и скелет на всех кадрах партии одним
-батч-вызовом. Бокс каждого человека делится на торс/ноги по плечам/бёдрам/коленям
-(для торса fallback — фиксированные доли высоты, если keypoints не уверенные).
+`frames` -- подряд идущие кадры ОДНОЙ камеры (окно). YOLOv8n-pose + BoT-SORT
+(model.py) находят людей, скелет и сшивают одного человека между кадрами:
+у каждого есть `track_id`, по которому платформа усредняет цвет одежды за окно
+(покадровая оценка шумит из-за теней и автоэкспозиции) и берёт бокс с
+последнего кадра для скриншота. Усреднение и фильтрация -- на стороне
+платформы, здесь только то, для чего нужны пиксели.
+
+Бокс каждого человека делится на торс/ноги по плечам/бёдрам/коленям (для торса
+fallback — фиксированные доли высоты, если keypoints не уверенные).
 Если коленей в кадре нет — человек сидит за партой или обрезан — низ считаем
 невидимым и отдаём `bottom_color: null`, а не цвет парты.
 
@@ -163,6 +169,10 @@ class PersonsDetector:
         self._model = None
         # Сериализуем доступ к одной модели/GPU между потоками воркеров.
         self._lock = threading.Lock()
+        # Сквозной счётчик id: трекер в каждом запросе нумерует с 1, и платформа,
+        # склеив ответы двух запросов по track_id, склеила бы разных людей.
+        # Наружу отдаём номера, которые в рамках процесса не повторяются.
+        self._next_track_id = 1
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -200,6 +210,7 @@ class PersonsDetector:
             per_frame_dets = detect(
                 self._model, decoded, self._settings.persons_conf_thresh, self._device
             )
+            self._renumber_tracks(per_frame_dets)
 
         results = [
             self._build_frame_result(bgr, dets, query)
@@ -211,6 +222,19 @@ class PersonsDetector:
         logger.debug("frames=%d, persons=%d (%.1f ms)", len(frames), total_persons, elapsed_ms)
 
         return {"results": results, "processing_ms": round(elapsed_ms, 2)}
+
+    def _renumber_tracks(self, per_frame_dets: list[list[dict]]) -> None:
+        """Локальные id трекера (1, 2, 3... в каждом запросе) -> сквозные по процессу."""
+        mapping: dict[int, int] = {}
+        for dets in per_frame_dets:
+            for det in dets:
+                raw = det["track_id"]
+                if raw is None:
+                    continue
+                if raw not in mapping:
+                    mapping[raw] = self._next_track_id
+                    self._next_track_id += 1
+                det["track_id"] = mapping[raw]
 
     def _build_frame_result(self, bgr: np.ndarray, dets: list[dict], query: dict | None) -> dict:
         h, w = bgr.shape[:2]
@@ -267,6 +291,7 @@ class PersonsDetector:
             bottom_rgb = _dominant_color(crop[int(b0):int(b1), margin_x:crop_w - margin_x])
 
         return {
+            "track_id": det["track_id"],
             "box": [x1 / w, y1 / h, x2 / w, y2 / h],
             "confidence": round(det["conf"], 4),
             "top_color": _nearest_color_label(top_rgb),

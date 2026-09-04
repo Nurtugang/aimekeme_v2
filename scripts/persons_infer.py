@@ -39,12 +39,16 @@ def _encode(frame_bgr: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
-def detect(detector: PersonsDetector, frame_bgr: np.ndarray, query: dict | None):
-    """Один BGR-кадр -> (persons, infer_ms). persons -- как в ответе /detect/persons."""
+def detect(detector: PersonsDetector, window_bgr: list[np.ndarray], query: dict | None):
+    """Окно BGR-кадров одной камеры -> (persons по кадрам, infer_ms).
+
+    Ровно один вызов на окно -- как будет делать платформа: внутри окна track_id
+    сшивает человека между кадрами, между окнами трекер сбрасывается.
+    """
     t0 = time.perf_counter()
-    result = detector.predict([_encode(frame_bgr)], query)
+    result = detector.predict([_encode(f) for f in window_bgr], query)
     infer_ms = (time.perf_counter() - t0) * 1000.0
-    return result["results"][0]["persons"], infer_ms
+    return [fr["persons"] for fr in result["results"]], infer_ms
 
 
 def draw_overlay(frame: np.ndarray, persons: list[dict]) -> np.ndarray:
@@ -54,7 +58,7 @@ def draw_overlay(frame: np.ndarray, persons: list[dict]) -> np.ndarray:
         x1, y1, x2, y2 = int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
         cv2.rectangle(frame, (x1, y1), (x2, y2), _BOX_COLOR, 2)
         bottom = p["bottom_color"] if p["bottom_visible"] else "?"
-        label = f"{p['top_color']}/{bottom} ({p['confidence']:.2f})"
+        label = f"#{p['track_id']} {p['top_color']}/{bottom}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 6, y1), _BOX_COLOR, -1)
         cv2.putText(frame, label, (x1 + 3, y1 - 5),
@@ -83,20 +87,20 @@ def run_photo(detector: PersonsDetector, path: Path, query: dict | None):
         raise FileNotFoundError(f"Не могу открыть фото: {path}")
 
     wall0 = time.perf_counter()
-    persons, infer_ms = detect(detector, frame, query)
+    (persons,), infer_ms = detect(detector, [frame], query)
     out_path = path.with_name(f"{path.stem}_persons.jpg")
     cv2.imwrite(str(out_path), draw_overlay(frame, persons))
 
     print(f"\nРезультат: людей = {len(persons)}")
     for p in persons:
-        print(f"  box={p['box']} conf={p['confidence']} "
+        print(f"  id={p['track_id']} box={p['box']} conf={p['confidence']} "
               f"top={p['top_color']} {p['top_hsv']} "
               f"bottom={p['bottom_color']} {p['bottom_hsv']} visible={p['bottom_visible']}")
     print(f"Сохранено: {out_path}")
     _report(1, infer_ms, time.perf_counter() - wall0)
 
 
-def run_video(detector: PersonsDetector, path: Path, query: dict | None):
+def run_video(detector: PersonsDetector, path: Path, query: dict | None, window: int):
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise FileNotFoundError(f"Не могу открыть видео: {path}")
@@ -110,19 +114,30 @@ def run_video(detector: PersonsDetector, path: Path, query: dict | None):
     writer = cv2.VideoWriter(
         str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
 
-    print(f"\nОбрабатываю: {path}  ({total} кадров, {fps:.1f} fps)\n")
+    if window <= 0:
+        window = total or 10 ** 6
+    print(f"\nОбрабатываю: {path}  ({total} кадров, {fps:.1f} fps, окно {window})\n")
     idx = 0
     infer_total_ms = 0.0
     wall0 = time.perf_counter()
     while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
+        batch = []
+        while len(batch) < window:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            batch.append(frame)
+        if not batch:
             break
-        idx += 1
-        persons, infer_ms = detect(detector, frame, query)
+
+        per_frame_persons, infer_ms = detect(detector, batch, query)
         infer_total_ms += infer_ms
-        writer.write(draw_overlay(frame, persons))
-        print(f"  Кадр {idx:5d}/{total}  |  людей: {len(persons)}")
+        ids = {p["track_id"] for persons in per_frame_persons for p in persons}
+        for frame, persons in zip(batch, per_frame_persons):
+            idx += 1
+            writer.write(draw_overlay(frame, persons))
+        print(f"  Кадры {idx - len(batch) + 1:4d}-{idx:<4d}/{total}  |  "
+              f"людей на последнем кадре: {len(per_frame_persons[-1])}  |  треков в окне: {len(ids)}")
 
     cap.release()
     writer.release()
@@ -137,6 +152,9 @@ def main():
                         help="тип входа: video или photo")
     parser.add_argument("--conf", type=float, default=None,
                         help="порог уверенности детектора (по умолчанию из config)")
+    parser.add_argument("--window", type=int, default=0,
+                        help="кадров в одном запросе (окно трекинга); 0 = всё видео одним "
+                             "окном. Внутри окна track_id стабильны, между окнами -- нет")
     parser.add_argument("--query-top", default=None, help="фильтр: только этот цвет верха")
     parser.add_argument("--query-bottom", default=None, help="фильтр: только этот цвет низа")
     args = parser.parse_args()
@@ -155,7 +173,7 @@ def main():
     detector.load()
 
     if args.type == "video":
-        run_video(detector, path, query)
+        run_video(detector, path, query, args.window)
     else:
         run_photo(detector, path, query)
 
