@@ -3,11 +3,11 @@
 Гоняет ту же цепочку, что и API (app/persons/), по видео или фото — через
 PersonsDetector.predict(), то есть ровно тот же путь: decode -> детекция ->
 деление на верх/низ по keypoints -> цвет. Рисует боксы + подписи цвета,
-печатает тайминги. Необязательно можно проверить и query-фильтр.
+печатает тайминги.
 
 Запуск (из корня репозитория):
-    python scripts/persons_infer.py <путь> <тип> [--conf 0.4]
-                                     [--query-top blue] [--query-bottom black]
+    python scripts/persons_infer.py <путь> <тип> [--weights yolov8l-pose.pt]
+                                     [--conf 0.4] [--window 20]
 где <тип> = video | photo (frame/image — синонимы photo).
 
 Видео -> <имя>_persons.mp4 рядом с исходником; фото -> <имя>_persons.jpg + вывод в консоль.
@@ -39,14 +39,14 @@ def _encode(frame_bgr: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
-def detect(detector: PersonsDetector, window_bgr: list[np.ndarray], query: dict | None):
+def detect(detector: PersonsDetector, window_bgr: list[np.ndarray]):
     """Окно BGR-кадров одной камеры -> (persons по кадрам, infer_ms).
 
     Ровно один вызов на окно -- как будет делать платформа: внутри окна track_id
     сшивает человека между кадрами, между окнами трекер сбрасывается.
     """
     t0 = time.perf_counter()
-    result = detector.predict([_encode(f) for f in window_bgr], query)
+    result = detector.predict([_encode(f) for f in window_bgr])
     infer_ms = (time.perf_counter() - t0) * 1000.0
     return [fr["persons"] for fr in result["results"]], infer_ms
 
@@ -81,13 +81,13 @@ def _report(n_frames: int, infer_total_ms: float, wall_total_s: float) -> None:
     print(f"Всего (wall, с I/O):    {wall_total_s:.3f} c")
 
 
-def run_photo(detector: PersonsDetector, path: Path, query: dict | None):
+def run_photo(detector: PersonsDetector, path: Path):
     frame = cv2.imread(str(path))
     if frame is None:
         raise FileNotFoundError(f"Не могу открыть фото: {path}")
 
     wall0 = time.perf_counter()
-    (persons,), infer_ms = detect(detector, [frame], query)
+    (persons,), infer_ms = detect(detector, [frame])
     out_path = path.with_name(f"{path.stem}_persons.jpg")
     cv2.imwrite(str(out_path), draw_overlay(frame, persons))
 
@@ -100,7 +100,7 @@ def run_photo(detector: PersonsDetector, path: Path, query: dict | None):
     _report(1, infer_ms, time.perf_counter() - wall0)
 
 
-def run_video(detector: PersonsDetector, path: Path, query: dict | None, window: int):
+def run_video(detector: PersonsDetector, path: Path, window: int):
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise FileNotFoundError(f"Не могу открыть видео: {path}")
@@ -130,7 +130,7 @@ def run_video(detector: PersonsDetector, path: Path, query: dict | None, window:
         if not batch:
             break
 
-        per_frame_persons, infer_ms = detect(detector, batch, query)
+        per_frame_persons, infer_ms = detect(detector, batch)
         infer_total_ms += infer_ms
         ids = {p["track_id"] for persons in per_frame_persons for p in persons}
         for frame, persons in zip(batch, per_frame_persons):
@@ -157,18 +157,12 @@ def main():
     parser.add_argument("--window", type=int, default=0,
                         help="кадров в одном запросе (окно трекинга); 0 = всё видео одним "
                              "окном. Внутри окна track_id стабильны, между окнами -- нет")
-    parser.add_argument("--query-top", default=None, help="фильтр: только этот цвет верха")
-    parser.add_argument("--query-bottom", default=None, help="фильтр: только этот цвет низа")
     args = parser.parse_args()
 
     if args.weights:
         settings.persons_weights = args.weights
     if args.conf is not None:
         settings.persons_conf_thresh = args.conf
-
-    query = None
-    if args.query_top or args.query_bottom:
-        query = {"top": args.query_top, "bottom": args.query_bottom}
 
     path = Path(args.path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -177,9 +171,9 @@ def main():
     detector.load()
 
     if args.type == "video":
-        run_video(detector, path, query, args.window)
+        run_video(detector, path, args.window)
     else:
-        run_photo(detector, path, query)
+        run_photo(detector, path)
 
 
 if __name__ == "__main__":
