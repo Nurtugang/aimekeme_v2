@@ -1,8 +1,10 @@
 """Детекция людей + оценка цвета одежды (верх/низ) по пачке кадров.
 
 YOLOv8n-pose (model.py) находит людей и скелет на всех кадрах партии одним
-батч-вызовом. Бокс каждого человека делится на торс/ноги по плечам/бёдрам/
-коленям (fallback — фиксированные доли высоты, если keypoints не уверенные).
+батч-вызовом. Бокс каждого человека делится на торс/ноги по плечам/бёдрам/коленям
+(для торса fallback — фиксированные доли высоты, если keypoints не уверенные).
+Если коленей в кадре нет — человек сидит за партой или обрезан — низ считаем
+невидимым и отдаём `bottom_color: null`, а не цвет парты.
 
 Перед оценкой доминирующего цвета из каждой зоны исключаются пиксели, похожие
 на голую кожу (YCrCb-эвристика) — иначе загорелые руки на короткой рубашке или
@@ -35,6 +37,9 @@ logger = logging.getLogger("surveillance.persons")
 
 _DATA_URI_MARKER = "base64,"
 _MIN_CROP_H, _MIN_CROP_W = 40, 20
+_MIN_REGION_PX = 6  # зона тоньше -- пикселей не хватит на осмысленный цвет
+_MAX_HIP_REL = 0.75   # бёдра ниже этой доли высоты бокса -> ног в кадре нет
+_MAX_KNEE_REL = 0.95  # колени у нижней кромки бокса -> они «дорисованы» под партой
 _KMEANS_K = 3
 _SKIN_FALLBACK_FRACTION = 0.75  # кожа >= этой доли зоны -> маска игнорируется
 
@@ -106,25 +111,41 @@ def _dominant_color(region_bgr: np.ndarray) -> tuple[int, int, int]:
     return tuple(int(c) for c in centers[np.argmax(counts)])
 
 
-def _region_bounds(crop_h: int, body_lines_rel: dict | None) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Границы (верх, низ) зоны в пикселях кропа -- по keypoints, либо по
-    фиксированным долям высоты, если keypoints не дали пригодного деления."""
+def _region_bounds(
+    crop_h: int, body_lines_rel: dict | None
+) -> tuple[tuple[float, float], tuple[float, float] | None]:
+    """Границы (верх, низ) зоны в пикселях кропа. Низ = None, если его не видно.
+
+    Низ считаем видимым только когда ноги реально попали в кадр. Одних
+    keypoints мало: pose-модель дорисовывает скрытые суставы, и у сидящего за
+    партой студента колени «предсказываются» под столом -- ниже бокса детекции,
+    который построен по видимой части тела. Поэтому требуем, чтобы бёдра и
+    колени лежали внутри бокса (замеры на аудитории: сидящие -- бёдра 0.8-1.3,
+    колени 0.93-1.12 высоты бокса; стоящие -- 0.6 и 0.85). Иначе там парта, и
+    честнее вернуть None, чем правдоподобное враньё.
+    Верх при отсутствии keypoints ещё можно взять по долям высоты (торс всегда
+    в верхней части бокса), низ -- уже нет.
+    """
     if body_lines_rel is not None:
         shoulder_y = body_lines_rel["shoulder_y"]
         hip_y = body_lines_rel["hip_y"]
         knee_y = body_lines_rel["knee_y"]
         if shoulder_y is not None and hip_y is not None and hip_y > shoulder_y:
-            top = (shoulder_y + 0.06 * crop_h, hip_y - 0.03 * crop_h)
-            bottom_end = (
-                knee_y if (knee_y is not None and knee_y > hip_y)
-                else hip_y + (hip_y - shoulder_y) * 1.1
+            top = (max(0.0, shoulder_y + 0.06 * crop_h), min(crop_h, hip_y - 0.03 * crop_h))
+            bottom = None
+            legs_in_frame = (
+                knee_y is not None
+                and knee_y > hip_y
+                and hip_y <= _MAX_HIP_REL * crop_h
+                and knee_y <= _MAX_KNEE_REL * crop_h
             )
-            bottom = (hip_y + 0.02 * crop_h, bottom_end)
-            top = (max(0, top[0]), min(crop_h, top[1]))
-            bottom = (max(0, bottom[0]), min(crop_h, bottom[1]))
-            if top[1] - top[0] >= 6 and bottom[1] - bottom[0] >= 6:
+            if legs_in_frame:
+                bottom = (max(0.0, hip_y + 0.02 * crop_h), knee_y)
+                if bottom[1] - bottom[0] < _MIN_REGION_PX:
+                    bottom = None
+            if top[1] - top[0] >= _MIN_REGION_PX:
                 return top, bottom
-    return (crop_h * 0.22, crop_h * 0.52), (crop_h * 0.55, crop_h * 0.92)
+    return (crop_h * 0.22, crop_h * 0.52), None
 
 
 class InvalidFrameError(ValueError):
@@ -205,9 +226,14 @@ class PersonsDetector:
 
     @staticmethod
     def _matches_query(person: dict, query: dict) -> bool:
+        """Совпадение по цвету. bottom_color=None -- это «не видно», а не «не тот
+        цвет»: сидящего за партой человека с подходящим верхом из выдачи не
+        выкидываем, платформа покажет его ниже по списку (bottom_visible=false).
+        """
         if query.get("top") and person["top_color"] != query["top"]:
             return False
-        if query.get("bottom") and person["bottom_color"] != query["bottom"]:
+        if query.get("bottom") and person["bottom_visible"] \
+                and person["bottom_color"] != query["bottom"]:
             return False
         return True
 
@@ -229,21 +255,25 @@ class PersonsDetector:
                 "knee_y": (bl["knee_y"] - y1) if bl["knee_y"] is not None else None,
             }
 
-        (t0, t1), (b0, b1) = _region_bounds(crop_h, body_lines_rel)
+        top_bounds, bottom_bounds = _region_bounds(crop_h, body_lines_rel)
         margin_x = max(1, int(crop_w * 0.2))
-        top_region = crop[int(t0):int(t1), margin_x:crop_w - margin_x]
-        bottom_region = crop[int(b0):int(b1), margin_x:crop_w - margin_x]
 
-        top_rgb = _dominant_color(top_region)
-        bottom_rgb = _dominant_color(bottom_region)
+        t0, t1 = top_bounds
+        top_rgb = _dominant_color(crop[int(t0):int(t1), margin_x:crop_w - margin_x])
+
+        bottom_rgb = None
+        if bottom_bounds is not None:
+            b0, b1 = bottom_bounds
+            bottom_rgb = _dominant_color(crop[int(b0):int(b1), margin_x:crop_w - margin_x])
 
         return {
             "box": [x1 / w, y1 / h, x2 / w, y2 / h],
             "confidence": round(det["conf"], 4),
             "top_color": _nearest_color_label(top_rgb),
             "top_hsv": _rgb_to_hsv_out(top_rgb),
-            "bottom_color": _nearest_color_label(bottom_rgb),
-            "bottom_hsv": _rgb_to_hsv_out(bottom_rgb),
+            "bottom_visible": bottom_rgb is not None,
+            "bottom_color": _nearest_color_label(bottom_rgb) if bottom_rgb else None,
+            "bottom_hsv": _rgb_to_hsv_out(bottom_rgb) if bottom_rgb else None,
         }
 
     # --- helpers -------------------------------------------------------

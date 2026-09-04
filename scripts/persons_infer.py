@@ -53,7 +53,8 @@ def draw_overlay(frame: np.ndarray, persons: list[dict]) -> np.ndarray:
         x1, y1, x2, y2 = p["box"]
         x1, y1, x2, y2 = int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)
         cv2.rectangle(frame, (x1, y1), (x2, y2), _BOX_COLOR, 2)
-        label = f"{p['top_color']}/{p['bottom_color']} ({p['confidence']:.2f})"
+        bottom = p["bottom_color"] if p["bottom_visible"] else "?"
+        label = f"{p['top_color']}/{bottom} ({p['confidence']:.2f})"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 6, y1), _BOX_COLOR, -1)
         cv2.putText(frame, label, (x1 + 3, y1 - 5),
@@ -89,7 +90,8 @@ def run_photo(detector: PersonsDetector, path: Path, query: dict | None):
     print(f"\nРезультат: людей = {len(persons)}")
     for p in persons:
         print(f"  box={p['box']} conf={p['confidence']} "
-              f"top={p['top_color']} {p['top_hsv']} bottom={p['bottom_color']} {p['bottom_hsv']}")
+              f"top={p['top_color']} {p['top_hsv']} "
+              f"bottom={p['bottom_color']} {p['bottom_hsv']} visible={p['bottom_visible']}")
     print(f"Сохранено: {out_path}")
     _report(1, infer_ms, time.perf_counter() - wall0)
 
