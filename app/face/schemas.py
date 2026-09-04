@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class FaceBox(BaseModel):
@@ -20,12 +20,41 @@ class FaceBox(BaseModel):
 
 
 class FaceRequest(BaseModel):
-    frame: str = Field(..., description="Один base64-JPEG кадр.")
+    """Один кадр (`frame`) ЛИБО пачка кадров (`frames`) — ровно одно из двух полей."""
+
+    frame: str | None = Field(None, description="Один base64-JPEG кадр.")
+    frames: list[str] | None = Field(
+        None, description="Пачка base64-JPEG кадров (напр. зоны обхода PTZ)."
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "FaceRequest":
+        if (self.frame is None) == (self.frames is None):
+            raise ValueError("provide exactly one of 'frame' or 'frames'")
+        if self.frames is not None and not self.frames:
+            raise ValueError("'frames' must not be empty")
+        return self
 
 
 class FaceResponse(BaseModel):
+    """Ответ на одиночный кадр (`frame`)."""
+
     faces: list[FaceBox]
     count: int
+    processing_ms: float
+
+
+class FaceFrameResult(BaseModel):
+    """Результат по одному кадру пачки (время — общее на запрос, здесь его нет)."""
+
+    faces: list[FaceBox]
+    count: int
+
+
+class FaceBatchResponse(BaseModel):
+    """Ответ на пачку (`frames`). Порядок results = порядок присланных кадров."""
+
+    results: list[FaceFrameResult]
     processing_ms: float
 
 
