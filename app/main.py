@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 import torch
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.counting.detector import CountingDetector
@@ -77,6 +78,13 @@ app = FastAPI(
     "детекция огня/дыма, подсчёт людей и детекция людей с цветом одежды.",
     version=settings.api_version,
     lifespan=lifespan,
+)
+
+# AI-API вызывается брокером (сервер-сервер), CORS ему не нужен. Разрешаем всё
+# только чтобы scripts/persons_test.html можно было открыть напрямую из браузера
+# (file://) для ручной проверки -- в проде эта строка не нужна.
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
 app.include_router(fight_router)

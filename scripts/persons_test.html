@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>/detect/persons — ручная проверка</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 20px; background: #f4f5f7; color: #1f2430; }
+  h1 { font-size: 18px; }
+  .row { display: flex; gap: 20px; flex-wrap: wrap; }
+  .panel { background: #fff; border: 1px solid #dfe2e7; border-radius: 8px; padding: 14px; }
+  label { display: block; font-size: 12px; color: #7a8190; margin: 10px 0 4px; }
+  input[type="text"], input[type="file"] { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #dfe2e7; border-radius: 5px; }
+  button { margin-top: 12px; padding: 8px 16px; border: none; border-radius: 5px; background: #ff6a3d; color: #fff; cursor: pointer; font-size: 13px; }
+  button:disabled { background: #ccc; cursor: default; }
+  #canvasWrap { position: relative; display: inline-block; }
+  canvas { max-width: 640px; border: 1px solid #dfe2e7; border-radius: 6px; display: block; }
+  #status { font-size: 12px; color: #7a8190; margin-top: 8px; }
+  #frames { display: flex; gap: 8px; overflow-x: auto; margin-top: 10px; }
+  #frames canvas { max-width: 160px; }
+  pre { max-width: 480px; max-height: 480px; overflow: auto; background: #1f2430; color: #d4d8e0; padding: 10px; border-radius: 6px; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<h1>Ручная проверка POST /detect/persons</h1>
+
+<div class="row">
+  <div class="panel" style="width: 320px;">
+    <label>API base URL</label>
+    <input type="text" id="apiBase" value="http://localhost:8000">
+
+    <label>Фото или видео</label>
+    <input type="file" id="fileInput" accept="image/*,video/*">
+
+    <label>Видео: кадров максимум / шаг (сек)</label>
+    <div style="display:flex; gap:8px;">
+      <input type="text" id="maxFrames" value="8" style="width:60px">
+      <input type="text" id="stepSec" value="1" style="width:60px">
+    </div>
+
+    <label>query.top (необязательно, напр. blue)</label>
+    <input type="text" id="qTop">
+
+    <label>query.bottom (необязательно, напр. black)</label>
+    <input type="text" id="qBottom">
+
+    <button id="runBtn" disabled>Отправить на /detect/persons</button>
+    <div id="status"></div>
+
+    <div id="frames"></div>
+  </div>
+
+  <div class="panel">
+    <div id="canvasWrap"><canvas id="mainCanvas"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <pre id="output">Ответ появится здесь.</pre>
+  </div>
+</div>
+
+<script>
+const fileInput = document.getElementById("fileInput");
+const runBtn = document.getElementById("runBtn");
+const statusEl = document.getElementById("status");
+const output = document.getElementById("output");
+const mainCanvas = document.getElementById("mainCanvas");
+const framesEl = document.getElementById("frames");
+
+let capturedFrames = [];   // [{canvas, b64}]
+
+function canvasToB64(canvas) {
+  return canvas.toDataURL("image/jpeg", 0.9).split(",")[1];
+}
+
+async function loadImageFrame(file) {
+  const img = await new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = reject;
+    im.src = URL.createObjectURL(file);
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  canvas.getContext("2d").drawImage(img, 0, 0);
+  return [{ canvas, b64: canvasToB64(canvas) }];
+}
+
+async function loadVideoFrames(file, maxFrames, stepSec) {
+  const video = document.createElement("video");
+  video.src = URL.createObjectURL(file);
+  video.muted = true;
+  await new Promise((resolve) => { video.onloadedmetadata = resolve; });
+
+  const frames = [];
+  let t = 0;
+  while (t < video.duration && frames.length < maxFrames) {
+    await new Promise((resolve) => {
+      video.onseeked = resolve;
+      video.currentTime = t;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+    frames.push({ canvas, b64: canvasToB64(canvas) });
+    t += stepSec;
+  }
+  return frames;
+}
+
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  statusEl.textContent = "Читаю файл...";
+  runBtn.disabled = true;
+  framesEl.innerHTML = "";
+
+  const maxFrames = parseInt(document.getElementById("maxFrames").value, 10) || 8;
+  const stepSec = parseFloat(document.getElementById("stepSec").value) || 1;
+
+  capturedFrames = file.type.startsWith("video/")
+    ? await loadVideoFrames(file, maxFrames, stepSec)
+    : await loadImageFrame(file);
+
+  drawMain(capturedFrames[0].canvas, []);
+  capturedFrames.forEach((f) => {
+    const c = f.canvas.cloneNode();
+    c.getContext("2d").drawImage(f.canvas, 0, 0);
+    framesEl.appendChild(c);
+  });
+
+  statusEl.textContent = `Готово: ${capturedFrames.length} кадр(ов).`;
+  runBtn.disabled = false;
+});
+
+function drawMain(sourceCanvas, persons) {
+  mainCanvas.width = sourceCanvas.width;
+  mainCanvas.height = sourceCanvas.height;
+  const ctx = mainCanvas.getContext("2d");
+  ctx.drawImage(sourceCanvas, 0, 0);
+
+  ctx.lineWidth = 2;
+  ctx.font = "13px system-ui";
+  persons.forEach((p) => {
+    const [x1, y1, x2, y2] = p.box;
+    const px1 = x1 * mainCanvas.width, py1 = y1 * mainCanvas.height;
+    const px2 = x2 * mainCanvas.width, py2 = y2 * mainCanvas.height;
+    ctx.strokeStyle = "#00e07a";
+    ctx.strokeRect(px1, py1, px2 - px1, py2 - py1);
+
+    const label = `${p.top_color}/${p.bottom_color} ${p.confidence.toFixed(2)}`;
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = "#00e07a";
+    ctx.fillRect(px1, py1 - 18, tw + 8, 18);
+    ctx.fillStyle = "#000";
+    ctx.fillText(label, px1 + 4, py1 - 4);
+  });
+}
+
+runBtn.addEventListener("click", async () => {
+  if (!capturedFrames.length) return;
+  runBtn.disabled = true;
+  statusEl.textContent = "Отправляю...";
+  output.textContent = "";
+
+  const apiBase = document.getElementById("apiBase").value.replace(/\/$/, "");
+  const top = document.getElementById("qTop").value.trim();
+  const bottom = document.getElementById("qBottom").value.trim();
+
+  const body = { frames: capturedFrames.map((f) => f.b64) };
+  if (top || bottom) {
+    body.query = {};
+    if (top) body.query.top = top;
+    if (bottom) body.query.bottom = bottom;
+  }
+
+  try {
+    const t0 = performance.now();
+    const resp = await fetch(`${apiBase}/detect/persons`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const roundtripMs = (performance.now() - t0).toFixed(0);
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      output.textContent = `HTTP ${resp.status}\n${errText}`;
+      statusEl.textContent = "Ошибка.";
+      return;
+    }
+
+    const data = await resp.json();
+    output.textContent = JSON.stringify(data, null, 2);
+    statusEl.textContent =
+      `OK. Сервер: ${data.processing_ms} мс, round-trip: ${roundtripMs} мс.`;
+
+    // Рисуем боксы первого кадра на главном канвасе.
+    const firstPersons = (data.results && data.results[0] && data.results[0].persons) || [];
+    drawMain(capturedFrames[0].canvas, firstPersons);
+  } catch (err) {
+    output.textContent = String(err);
+    statusEl.textContent = "Не достучался до сервера (CORS/адрес/сервер не запущен?).";
+  } finally {
+    runBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
