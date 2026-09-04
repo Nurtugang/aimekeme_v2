@@ -37,23 +37,11 @@ class FrameResult(BaseModel):
     count: int
 
 
-class PersonsQuery(BaseModel):
-    top: str | None = Field(None, description="Оставить только людей с таким цветом верха.")
-    bottom: str | None = Field(
-        None,
-        description="Оставить только людей с таким цветом низа. Люди с невидимым низом "
-                    "(bottom_visible=false) остаются в выдаче как кандидаты.",
-    )
-
-
 class PersonsRequest(BaseModel):
     frames: list[str] = Field(
         ...,
         description="1..N base64-JPEG кадров -- подряд идущие кадры ОДНОЙ камеры (окно). "
                     "Несколько камер = несколько параллельных запросов.",
-    )
-    query: PersonsQuery | None = Field(
-        None, description="Необязательный фильтр по цвету -- в ответе останутся только совпадения."
     )
 
 

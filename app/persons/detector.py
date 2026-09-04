@@ -18,9 +18,9 @@ fallback — фиксированные доли высоты, если keypoint
 всю зону — маска игнорируется (на крохах пикселей k-means может зацепиться за
 случайную деталь, а не за одежду).
 
-Цвет отдаётся и как ближайшее название из фиксированной палитры (для фильтра
-и удобства), и как сырой HSV. Опциональный query фильтрует людей по этим
-названиям — в ответе остаются только совпадения.
+Цвет отдаётся и как ближайшее название из фиксированной палитры, и как сырой
+HSV. Фильтрация по цвету — не наша забота: в ответе есть всё, что нужно
+платформе, чтобы отобрать людей самой.
 """
 
 from __future__ import annotations
@@ -192,11 +192,8 @@ class PersonsDetector:
 
     # --- inference ---------------------------------------------------------
 
-    def predict(self, frames: list[str], query: dict | None) -> dict:
-        """Декод + детекция людей + цвет верха/низа на каждом кадре партии.
-
-        query, если задан ({"top": "...", "bottom": "..."}), фильтрует людей
-        по названию цвета -- в ответе остаются только совпадения.
+    def predict(self, frames: list[str]) -> dict:
+        """Декод + детекция людей + цвет верха/низа на каждом кадре окна.
 
         Raises:
             InvalidFrameError: если какой-то кадр не валидный base64/JPEG.
@@ -214,7 +211,7 @@ class PersonsDetector:
             self._renumber_tracks(per_frame_dets)
 
         results = [
-            self._build_frame_result(bgr, dets, query)
+            self._build_frame_result(bgr, dets)
             for bgr, dets in zip(decoded, per_frame_dets)
         ]
 
@@ -237,30 +234,13 @@ class PersonsDetector:
                     self._next_track_id += 1
                 det["track_id"] = mapping[raw]
 
-    def _build_frame_result(self, bgr: np.ndarray, dets: list[dict], query: dict | None) -> dict:
+    def _build_frame_result(self, bgr: np.ndarray, dets: list[dict]) -> dict:
         h, w = bgr.shape[:2]
-        persons = []
-        for det in dets:
-            person = self._describe_person(bgr, w, h, det)
-            if person is None:
-                continue
-            if query and not self._matches_query(person, query):
-                continue
-            persons.append(person)
+        persons = [
+            person for det in dets
+            if (person := self._describe_person(bgr, w, h, det)) is not None
+        ]
         return {"persons": persons, "count": len(persons)}
-
-    @staticmethod
-    def _matches_query(person: dict, query: dict) -> bool:
-        """Совпадение по цвету. bottom_color=None -- это «не видно», а не «не тот
-        цвет»: сидящего за партой человека с подходящим верхом из выдачи не
-        выкидываем, платформа покажет его ниже по списку (bottom_visible=false).
-        """
-        if query.get("top") and person["top_color"] != query["top"]:
-            return False
-        if query.get("bottom") and person["bottom_visible"] \
-                and person["bottom_color"] != query["bottom"]:
-            return False
-        return True
 
     def _describe_person(self, bgr: np.ndarray, w: int, h: int, det: dict) -> dict | None:
         x1, y1, x2, y2 = det["box_px"]
