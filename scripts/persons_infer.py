@@ -150,6 +150,8 @@ def main():
     parser.add_argument("path", help="путь к видео или фото")
     parser.add_argument("type", choices=["video", "photo", "frame", "image"],
                         help="тип входа: video или photo")
+    parser.add_argument("--weights", default=None,
+                        help="веса pose-модели (по умолчанию из config)")
     parser.add_argument("--conf", type=float, default=None,
                         help="порог уверенности детектора (по умолчанию из config)")
     parser.add_argument("--window", type=int, default=0,
@@ -159,6 +161,8 @@ def main():
     parser.add_argument("--query-bottom", default=None, help="фильтр: только этот цвет низа")
     args = parser.parse_args()
 
+    if args.weights:
+        settings.persons_weights = args.weights
     if args.conf is not None:
         settings.persons_conf_thresh = args.conf
 
@@ -168,7 +172,7 @@ def main():
 
     path = Path(args.path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Загружаю YOLOv8n-pose на {device} ...")
+    print(f"Загружаю {settings.persons_weights} на {device} ...")
     detector = PersonsDetector(settings, device)
     detector.load()
 

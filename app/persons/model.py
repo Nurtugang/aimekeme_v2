@@ -4,8 +4,9 @@ Keypoints (плечи/бёдра/колени) нужны детектору, ч
 верх/низ по фактической анатомии, а не пополам. Трекер (встроенный в ultralytics)
 даёт track_id — им платформа сшивает одного человека между кадрами окна и
 усредняет цвет одежды. Один класс на выходе — person (COCO id 0).
-Веса (~6.5 МБ) не коммитим — качаются один раз при load() в кэш
-ultralytics, как и для counting `yolo_head` / fire `yolo_dfire`.
+Размер модели задаётся настройкой `persons_weights` (по умолчанию yolov8l-pose:
+нано теряет треть аудитории, замеры в config.py). Веса не коммитим — качаются
+один раз при load(), как для counting `yolo_head` / fire `yolo_dfire`.
 """
 
 from __future__ import annotations
@@ -24,10 +25,10 @@ _PERSON_CLASS_ID = 0
 _TRACKER_CFG = "botsort.yaml"
 
 
-def load_persons_model(device: torch.device):
+def load_persons_model(weights: str, device: torch.device):
     from ultralytics import YOLO
 
-    model = YOLO("yolov8n-pose.pt")
+    model = YOLO(weights)
     model.to(device)
     return model
 
