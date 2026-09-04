@@ -80,13 +80,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# AI-API вызывается брокером (сервер-сервер), CORS ему не нужен. Разрешаем всё
-# только чтобы scripts/persons_test.html можно было открыть напрямую из браузера
-# (file://) для ручной проверки -- в проде эта строка не нужна.
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
-
 app.include_router(fight_router)
 app.include_router(face_router)
 app.include_router(fire_router)
