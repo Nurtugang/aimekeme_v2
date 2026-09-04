@@ -4,6 +4,14 @@ from pydantic import BaseModel, Field
 
 
 class PersonBox(BaseModel):
+    track_id: int | None = Field(
+        None,
+        description="Идентификатор человека, общий для всех кадров запроса -- по нему "
+                    "платформа группирует и усредняет цвет за окно. null, если трекер "
+                    "ещё не подтвердил след. ВАЖНО: сшивать людей между разными "
+                    "запросами по track_id нельзя -- номера не повторяются, в каждом "
+                    "ответе они новые даже для тех же самых людей.",
+    )
     box: list[float] = Field(
         ..., description="Рамка человека [x1, y1, x2, y2], доли кадра 0..1."
     )
@@ -39,7 +47,11 @@ class PersonsQuery(BaseModel):
 
 
 class PersonsRequest(BaseModel):
-    frames: list[str] = Field(..., description="1..N base64-JPEG кадров.")
+    frames: list[str] = Field(
+        ...,
+        description="1..N base64-JPEG кадров -- подряд идущие кадры ОДНОЙ камеры (окно). "
+                    "Несколько камер = несколько параллельных запросов.",
+    )
     query: PersonsQuery | None = Field(
         None, description="Необязательный фильтр по цвету -- в ответе останутся только совпадения."
     )

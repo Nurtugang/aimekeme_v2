@@ -68,6 +68,9 @@ yacs==0.1.8
 # Инференс идёт через наш torch (cu128) — отдельный torch НЕ тянет.
 ultralytics==8.4.116
 ultralytics-thop==2.1.6
+# lap -- матчинг боксов для трекера BoT-SORT (persons). Без него ultralytics
+# доставляет его сам при первом track(), а в проде это недопустимо.
+lap==0.5.13
 matplotlib==3.10.9
 polars==1.43.2
 polars-runtime-32==1.43.2
