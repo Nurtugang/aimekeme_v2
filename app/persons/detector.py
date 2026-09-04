@@ -177,8 +177,9 @@ class PersonsDetector:
     # --- lifecycle ---------------------------------------------------------
 
     def load(self) -> None:
-        logger.info("Loading YOLOv8n-pose on device=%s ...", self._device)
-        self._model = load_persons_model(self._device)
+        logger.info("Loading %s on device=%s ...",
+                    self._settings.persons_weights, self._device)
+        self._model = load_persons_model(self._settings.persons_weights, self._device)
         logger.info("Persons detector ready.")
 
     @property

@@ -32,8 +32,9 @@ class Settings(BaseSettings):
     face_max_upload_bytes: int = 5 * 1024 * 1024
     face_max_image_side: int = 1600
 
-    # --- persons (YOLOv8n-pose: боксы людей + цвет верха/низа) ---
-    persons_conf_thresh: float = 0.4  # боксы ниже уверенности детектора не идут в ответ
+    # --- persons (YOLOv8-pose + BoT-SORT)
+    persons_weights: str = "yolov8l-pose.pt"
+    persons_conf_thresh: float = 0.4
 
 
 settings = Settings()
