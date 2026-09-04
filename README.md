@@ -135,10 +135,13 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 Ответ:
 ```json
-{ "label": "person", "count": 12, "confidence": 0.94, "processing_ms": 74.0 }
+{ "label": "person", "count": 12, "confidence": 0.94,
+  "boxes": [[120.0, 80.0, 160.0, 130.0], "..."], "processing_ms": 74.0 }
 ```
 `count` — число обнаруженных людей (боксы выше `COUNT_SCORE_THRESH`);
-`confidence` — средний score детектора по ним (0.0, если никого). Ответ одинаков
+`confidence` — средний score детектора по ним (0.0, если никого); `boxes` —
+их пиксельные `xyxy` (для `yolo_head` — боксы голов, для `frcnn` — всего тела;
+пригодится, например, для heatmap/трекинга на стороне клиента). Ответ одинаков
 для обеих моделей (`COUNT_MODEL` = `frcnn` | `yolo_head`) — контракт не меняется.
 Ошибки (HTTP 422): `Invalid base64 image`.
 

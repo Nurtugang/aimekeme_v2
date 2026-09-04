@@ -6,7 +6,10 @@
 Backend грузится один раз при старте и реализует единый интерфейс
 `load()`/`is_ready`/`predict(bgr) -> (boxes, scores)`. Детектор поверх него делает
 decode base64, лок вокруг GPU-инференса, тайминг и формат ответа. Контракт ответа
-одинаков для обеих моделей: `{ label:"person", count, confidence, processing_ms }`.
+одинаков для обеих моделей: `{ label:"person", count, confidence, boxes, processing_ms }`.
+`boxes` — пиксельные xyxy боксов, попавших в count (для `yolo_head` — боксы голов,
+для `frcnn` — боксы всего тела); используется, например, платформой поверх AI-API
+для heatmap/трекинга, сам по себе на `count`/`confidence` не влияет.
 """
 
 from __future__ import annotations
@@ -80,7 +83,7 @@ class CountingDetector:
 
         bgr = self._decode(frame)
         with self._lock:
-            _, scores = self._backend.predict(bgr)
+            boxes, scores = self._backend.predict(bgr)
 
         count = int(scores.shape[0])
         confidence = float(scores.mean()) if count else 0.0
@@ -92,6 +95,7 @@ class CountingDetector:
             "label": "person",
             "count": count,
             "confidence": round(confidence, 4),
+            "boxes": boxes.tolist(),
             "processing_ms": round(elapsed_ms, 2),
         }
 
