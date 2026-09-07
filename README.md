@@ -155,7 +155,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ### `POST /detect/counting`
 Запрос — один base64-JPEG кадр:
 ```json
-{ "frame": "<base64_jpg>" }
+{ "frame": "<base64_jpg>", "for_heatmap": false }
 ```
 Ответ:
 ```json
@@ -164,9 +164,12 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 `count` — число обнаруженных людей (боксы выше `COUNT_SCORE_THRESH`);
 `confidence` — средний score детектора по ним (0.0, если никого); `boxes` —
-их пиксельные `xyxy` (для `yolo_head` — боксы голов, для `frcnn` — всего тела;
-пригодится, например, для heatmap/трекинга на стороне клиента). Ответ одинаков
-для обеих моделей (`COUNT_MODEL` = `frcnn` | `yolo_head`) — контракт не меняется.
+их пиксельные `xyxy`. По умолчанию (`for_heatmap: false`) считает основной
+backend из `COUNT_MODEL` (обычно `yolo_head` — точнее в толпе, `boxes` — головы).
+`for_heatmap: true` — считает через `frcnn` (боксы всего тела), даже если
+`COUNT_MODEL` = `yolo_head`: у `frcnn` низ бокса корректно ложится на пол, что
+нужно для heatmap-позиционирования, в отличие от боксов головы. Обе модели
+грузятся при старте сервиса, так что выбор `for_heatmap` не стоит доп. задержки.
 Ошибки (HTTP 422): `Invalid base64 image`.
 
 ### `POST /detect/persons`

@@ -7,6 +7,12 @@ from pydantic import BaseModel, Field
 
 class CountingRequest(BaseModel):
     frame: str = Field(..., description="Один base64-JPEG кадр.")
+    for_heatmap: bool = Field(
+        False,
+        description="True — посчитать через frcnn (боксы всего тела, корректная "
+        "точка на полу для heatmap) вместо основного backend'а (COUNT_MODEL, "
+        "обычно yolo_head — лучше для самого count в толпе).",
+    )
 
 
 class CountingResponse(BaseModel):

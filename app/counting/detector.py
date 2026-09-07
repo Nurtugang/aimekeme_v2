@@ -1,15 +1,20 @@
-"""Детектор подсчёта людей. Backend выбирается настройкой `count_model`:
+"""Детектор подсчёта людей. Основной backend выбирается настройкой `count_model`:
 
 - `frcnn`      — torchvision Faster R-CNN, класс person (BSD, ноль доп. зависимостей);
 - `yolo_head`  — YOLOv8-детектор голов (SCUT-HEAD), точнее в толпе (ultralytics, AGPL).
 
-Backend грузится один раз при старте и реализует единый интерфейс
-`load()`/`is_ready`/`predict(bgr) -> (boxes, scores)`. Детектор поверх него делает
-decode base64, лок вокруг GPU-инференса, тайминг и формат ответа. Контракт ответа
-одинаков для обеих моделей: `{ label:"person", count, confidence, boxes, processing_ms }`.
-`boxes` — пиксельные xyxy боксов, попавших в count (для `yolo_head` — боксы голов,
-для `frcnn` — боксы всего тела); используется, например, платформой поверх AI-API
-для heatmap/трекинга, сам по себе на `count`/`confidence` не влияет.
+Оба backend'а грузятся один раз при старте (не только основной) — `frcnn` нужен
+ещё и для heatmap: его боксы — это весь силуэт, и низ бокса корректно ложится
+на пол, в отличие от `yolo_head` (бокс — голова). Если `count_model=frcnn`, второй
+экземпляр не грузим — используем один и тот же объект для обеих ролей.
+Каждый backend реализует единый интерфейс `load()`/`is_ready`/`predict(bgr) ->
+(boxes, scores)`. Детектор поверх него делает decode base64, лок вокруг
+GPU-инференса, тайминг и формат ответа. Контракт ответа одинаков независимо от
+того, какой backend отработал запрос:
+`{ label:"person", count, confidence, boxes, processing_ms }`. `boxes` — пиксельные
+xyxy боксов, попавших в count (головы или всего тела — зависит от того, какой
+backend отработал); используется, например, платформой поверх AI-API для
+heatmap/трекинга, сам по себе на `count`/`confidence` не влияет.
 """
 
 from __future__ import annotations
@@ -43,13 +48,18 @@ class CountingDetector:
         self._settings = settings
         self._device = device
         try:
-            backend_cls = _BACKENDS[settings.count_model]
+            primary_cls = _BACKENDS[settings.count_model]
         except KeyError as exc:
             raise ValueError(
                 f"Unknown count_model={settings.count_model!r}, "
                 f"choose from {list(_BACKENDS)}") from exc
-        self._backend = backend_cls(device, settings)
-        # Сериализуем доступ к одной модели/GPU между потоками воркеров.
+        self._primary = primary_cls(device, settings)
+        # Хитмапу всегда нужен frcnn (боксы всего тела -> точка на полу).
+        # Если он и так основной — второй экземпляр не заводим.
+        self._heatmap = (
+            self._primary if settings.count_model == "frcnn"
+            else FrcnnCounter(device, settings))
+        # Сериализуем доступ к GPU между потоками воркеров (общий на оба backend'а).
         self._lock = threading.Lock()
 
     # --- lifecycle ---------------------------------------------------------
@@ -57,12 +67,16 @@ class CountingDetector:
     def load(self) -> None:
         logger.info("Loading counting backend '%s' on device=%s ...",
                     self._settings.count_model, self._device)
-        self._backend.load()
-        logger.info("Counting model ready.")
+        self._primary.load()
+        if self._heatmap is not self._primary:
+            logger.info("Loading counting backend 'frcnn' for heatmap on device=%s ...",
+                        self._device)
+            self._heatmap.load()
+        logger.info("Counting model(s) ready.")
 
     @property
     def is_ready(self) -> bool:
-        return self._backend.is_ready
+        return self._primary.is_ready and self._heatmap.is_ready
 
     @property
     def device(self) -> str:
@@ -70,20 +84,24 @@ class CountingDetector:
 
     # --- inference ---------------------------------------------------------
 
-    def predict(self, frame: str) -> dict:
+    def predict(self, frame: str, for_heatmap: bool = False) -> dict:
         """Декод + подсчёт людей на одном кадре.
+
+        `for_heatmap=True` — считать через `frcnn` (боксы всего тела, корректная
+        точка на полу), а не через основной backend из `count_model`.
 
         Raises:
             InvalidImageError: если кадр не валидный base64/JPEG.
         """
-        if not self._backend.is_ready:
+        backend = self._heatmap if for_heatmap else self._primary
+        if not backend.is_ready:
             raise RuntimeError("Model is not loaded")
 
         start = time.perf_counter()
 
         bgr = self._decode(frame)
         with self._lock:
-            boxes, scores = self._backend.predict(bgr)
+            boxes, scores = backend.predict(bgr)
 
         count = int(scores.shape[0])
         confidence = float(scores.mean()) if count else 0.0

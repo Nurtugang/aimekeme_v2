@@ -13,7 +13,7 @@ def detect_counting(payload: CountingRequest, request: Request) -> CountingRespo
     """Считает людей в кадре (детектор person, count = число боксов)."""
     detector = request.app.state.detectors["counting"]
     try:
-        result = detector.predict(payload.frame)
+        result = detector.predict(payload.frame, for_heatmap=payload.for_heatmap)
     except InvalidImageError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
